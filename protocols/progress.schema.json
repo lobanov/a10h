@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autoresearch.dev/protocols/progress.schema.json",
+  "title": "Progress event",
+  "type": "object",
+  "required": ["t", "pct", "stage"],
+  "additionalProperties": false,
+  "properties": {
+    "t": { "type": "number", "minimum": 0, "description": "seconds since job start" },
+    "pct": { "type": "number", "minimum": 0, "maximum": 100, "description": "progress percent (monotonic)" },
+    "eta_s": { "type": "number", "minimum": 0, "description": "best-effort seconds remaining" },
+    "stage": { "type": "string", "minLength": 1, "description": "human-readable stage" },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": { "type": ["number", "string", "boolean"] }
+    },
+    "state": {
+      "type": "string",
+      "enum": ["succeeded", "failed"],
+      "description": "terminal marker; present only on the final line"
+    }
+  }
+}
