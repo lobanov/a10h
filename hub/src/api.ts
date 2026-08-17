@@ -8,7 +8,7 @@ import { submitPlan, approvePlan, PlanError } from "./plans.ts";
 import { tick, LEASE_TTL_S, nodeMatches, resolveEscalation } from "./scheduler.ts";
 
 /**
- * Hub HTTP API (DESIGN.md §3.2, §4). Pull-only hub-spoke: spokes call
+ * Hub HTTP API (DESIGN.md §3.2, §4). Pull-only hub-workers: workers call
  * /api/nodes/heartbeat, /api/work, /api/jobs/:id/*; dashboard uses /api/state
  * and /api/stream (SSE). Auth: if AUTH_TOKEN is set, every request must carry
  * it via Authorization: Bearer or ?token= (EventSource cannot set headers).
@@ -152,7 +152,7 @@ export function createHttpServer(): ReturnType<typeof createServer> {
         return json(res, 400, { error: "action must be approve|reject|resolve" });
       }
 
-      // ---------- node plane (spokes) ----------
+      // ---------- node plane (workers) ----------
       if (route === "POST /api/nodes/heartbeat") {
         const body = JSON.parse((await readBody(req)).toString("utf8")) as {
           id?: string;

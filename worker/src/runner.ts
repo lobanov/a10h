@@ -1,9 +1,10 @@
 import { spawn, execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
+import { pathToFileURL } from "node:url";
 
 /**
- * Spoke runner (M3): pull work from the hub, execute job containers, relay
+ * Worker runner (M3): pull work from the hub, execute job containers, relay
  * progress/events, upload evidence. Never accepts inbound connections.
  *
  * Env: HUB_URL, NODE_ID, NODE_TAGS, REPO_PATH, CHECKOUT_STRATEGY
@@ -11,8 +12,10 @@ import { join, resolve, dirname } from "node:path";
  * used for docker -v mounts since the docker daemon is the host's).
  */
 
-const HUB = process.env.HUB_URL ?? "http://localhost:8080";
-const NODE_ID = process.env.NODE_ID ?? `runner-${process.pid}`;
+function getHub(): string {
+  return process.env.HUB_URL ?? "http://localhost:8080";
+}
+const NODE_ID = process.env.NODE_ID ?? `worker-${process.pid}`;
 const NODE_TAGS = parseTags(process.env.NODE_TAGS ?? "cpu:4");
 const REPO_PATH = resolve(process.env.REPO_PATH ?? "/repo");
 const STRATEGY = process.env.CHECKOUT_STRATEGY === "worktree" ? "worktree" : "clone";
@@ -32,7 +35,7 @@ interface JobSpec {
   timeout_s: number;
 }
 
-function parseTags(spec: string): Record<string, string | number | boolean> {
+export function parseTags(spec: string): Record<string, string | number | boolean> {
   const tags: Record<string, string | number | boolean> = {};
   for (const part of spec.split(",").map((s) => s.trim()).filter(Boolean)) {
     const [k, v] = part.split(":");
@@ -44,7 +47,7 @@ function parseTags(spec: string): Record<string, string | number | boolean> {
 }
 
 async function hub(path: string, init: RequestInit = {}): Promise<Response> {
-  return fetch(`${HUB}${path}`, { ...init, headers: { "content-type": "application/json", ...(init.headers ?? {}) } });
+  return fetch(`${getHub()}${path}`, { ...init, headers: { "content-type": "application/json", ...(init.headers ?? {}) } });
 }
 
 function sh(cmd: string, args: string[], opts: { cwd?: string; timeout?: number } = {}): { code: number; stdout: string; stderr: string } {
@@ -73,12 +76,17 @@ async function heartbeat(): Promise<void> {
   }
 }
 
-function checkout(job: JobSpec): string {
+export function checkout(job: JobSpec): string {
+  // Reads env lazily so tests can configure REPO_PATH/WORK_DIR/strategy per run.
+  const REPO_PATH = resolve(process.env.REPO_PATH ?? "/repo");
+  const WORK_DIR = resolve(process.env.WORK_DIR ?? "/work");
+  const STRATEGY = process.env.CHECKOUT_STRATEGY === "worktree" ? "worktree" : "clone";
   const dir = join(WORK_DIR, job.id);
   mkdirSync(WORK_DIR, { recursive: true });
   rmSync(dir, { recursive: true, force: true });
   if (STRATEGY === "worktree") {
     // Requires the mounted repo to be writable; shares .git objects.
+    // (safe.directory is set via global git config in the image; -c is ignored.)
     const r = sh("git", ["worktree", "add", "-f", dir, "HEAD"], { cwd: REPO_PATH });
     if (r.code !== 0) console.log(`[${NODE_ID}] worktree add failed, falling back to clone: ${r.stderr.slice(0, 300)}`);
     else return dir;
@@ -92,12 +100,12 @@ interface Tailer {
   stop(): void;
 }
 
-function findProgressFiles(workspace: string): string[] {
+export function findProgressFiles(workspace: string): string[] {
   const r = sh("find", [workspace, "-name", "progress.jsonl", "-not", "-path", "*/.git/*"], {});
   return r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
 }
 
-function startProgressTail(job: JobSpec, workspace: string, onCancel: () => void): Tailer {
+export function startProgressTail(job: JobSpec, workspace: string, onCancel: () => void): Tailer {
   // Jobs may emit progress.jsonl anywhere under the workspace (e.g. runs/<variant>/);
   // the runner discovers and tails all of them (protocols/README.md §2).
   const offsets = new Map<string, number>();
@@ -141,10 +149,14 @@ function startProgressTail(job: JobSpec, workspace: string, onCancel: () => void
   }, 500);
   return {
     stop() {
+      const wasCancelled = cancelled;
       cancelled = true;
       clearInterval(timer);
-      // final flush of any lines written between the last tick and now
-      for (const file of findProgressFiles(workspace)) void pump(file);
+      // final flush of any lines written between the last tick and now —
+      // but never after a cancellation (the job is being killed).
+      if (!wasCancelled) {
+        for (const file of findProgressFiles(workspace)) void pump(file);
+      }
     },
   };
 }
@@ -169,21 +181,22 @@ async function collectAndUpload(job: JobSpec, workspace: string): Promise<void> 
 
 async function executeJob(job: JobSpec): Promise<void> {
   busy = true;
-  const container = `autoresearch-job-${job.id}`.replace(/[^a-zA-Z0-9_.-]/g, "-");
-  console.log(`[${NODE_ID}] executing ${job.id} (${job.image})`);
-  const checkoutDir = checkout(job);
-  const workspace = join(checkoutDir, job.workspace_subdir ?? "");
-  if (!existsSync(workspace)) throw new Error(`workspace subdir missing: ${job.workspace_subdir}`);
-
-  // Materialize upstream evidence into the checkout (cross-activity data flow).
-  for (const file of job.inputs_evidence ?? []) {
-    const dest = join(workspace, file.path);
-    mkdirSync(dirname(dest), { recursive: true });
-    writeFileSync(dest, file.content);
-    console.log(`[${NODE_ID}] job ${job.id}: materialized input ${file.path}`);
-  }
-
+  let checkoutDir = "";
   try {
+    const container = `autoresearch-job-${job.id}`.replace(/[^a-zA-Z0-9_.-]/g, "-");
+    console.log(`[${NODE_ID}] executing ${job.id} (${job.image})`);
+    checkoutDir = checkout(job);
+    const workspace = join(checkoutDir, job.workspace_subdir ?? "");
+    if (!existsSync(workspace)) throw new Error(`workspace subdir missing: ${job.workspace_subdir}`);
+
+    // Materialize upstream evidence into the checkout (cross-activity data flow).
+    for (const file of job.inputs_evidence ?? []) {
+      const dest = join(workspace, file.path);
+      mkdirSync(dirname(dest), { recursive: true });
+      writeFileSync(dest, file.content);
+      console.log(`[${NODE_ID}] job ${job.id}: materialized input ${file.path}`);
+    }
+
     // Explicit pull so image fetch time is not billed to the job timeout.
     const pull = sh("docker", ["pull", job.image], { timeout: 600_000 });
     if (pull.code !== 0) console.log(`[${NODE_ID}] docker pull stderr: ${pull.stderr.slice(0, 300)}`);
@@ -240,14 +253,14 @@ async function executeJob(job: JobSpec): Promise<void> {
       body: JSON.stringify({ state, exit_code: exitCode }),
     });
   } finally {
-    rmSync(checkoutDir, { recursive: true, force: true });
-    if (STRATEGY === "worktree") sh("git", ["worktree", "prune"], { cwd: REPO_PATH });
+    if (checkoutDir) rmSync(checkoutDir, { recursive: true, force: true });
+    if (checkoutDir && STRATEGY === "worktree") sh("git", ["worktree", "prune"], { cwd: REPO_PATH });
     busy = false;
   }
 }
 
 async function main(): Promise<void> {
-  console.log(`[${NODE_ID}] spoke runner up (hub=${HUB}, repo=${REPO_PATH}, strategy=${STRATEGY}, tags=${JSON.stringify(NODE_TAGS)})`);
+  console.log(`[${NODE_ID}] worker runner up (hub=${getHub()}, repo=${resolve(process.env.REPO_PATH ?? "/repo")}, strategy=${process.env.CHECKOUT_STRATEGY ?? "clone"}, tags=${JSON.stringify(NODE_TAGS)})`);
   setInterval(() => void heartbeat(), HEARTBEAT_MS);
   await heartbeat();
 
@@ -274,7 +287,18 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((e) => {
-  console.error(`[${NODE_ID}] fatal:`, e);
-  process.exit(1);
-});
+// Auto-start guard: run the pull loop only when executed as the entrypoint
+// (npm start / container CMD), not when imported by tests.
+const isEntrypoint = (() => {
+  try {
+    return process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+  } catch {
+    return false;
+  }
+})();
+if (isEntrypoint) {
+  main().catch((e) => {
+    console.error(`[${NODE_ID}] fatal:`, e);
+    process.exit(1);
+  });
+}

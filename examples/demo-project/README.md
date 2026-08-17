@@ -100,23 +100,23 @@ git clone <framework-repo> && cd <framework-repo>
 ./scripts/fetch-models.sh                     # 15.8 GB local auditor model (optional)
 cp .env.example .env                          # fill Z_AI_API_KEY (director agent)
 
-# deploy: hub + postgres + two spokes (+ local vLLM when weights present)
+# deploy: hub + postgres + two workers (+ local vLLM when weights present)
 docker compose up -d postgres hub
-docker compose --profile spoke up -d
+docker compose --profile worker up -d
 docker compose --profile local-llm up -d vllm   # optional local auditor model
 
 open http://localhost:8080                     # dashboard: ops view + approvals
 ```
 
 Then submit the demo plan and drive it end-to-end (submission, approval, both
-spokes pulling work, gates, repair, escalation, agent notes):
+workers pulling work, gates, repair, escalation, agent notes):
 
 ```bash
 node scripts/e2e-demo.mjs http://localhost:8080
 ```
 
 You should see (in the dashboard and the e2e output): plan approval **blocking
-execution** until approved → jobs scheduled across two spokes → live progress/ETA
+execution** until approved → jobs scheduled across two workers → live progress/ETA
 → gates audited → the deliberate `repair-demo` gate fails, repairs, and
 **escalates** with a director recommendation → operator resolves → plan done,
 with auditor notes attached to every gate result.

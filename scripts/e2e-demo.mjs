@@ -5,7 +5,7 @@
  *   node scripts/e2e-demo.mjs [HUB_URL]
  *
  * Requires: hub running (agents configured for full verification), one or
- * more spokes pulling work, docker available to spokes.
+ * more workers pulling work, docker available to workers.
  *
  * Steps verified:
  *  1. plan submission -> approval pending, NO jobs created (blocking proof)
@@ -112,10 +112,10 @@ async function main() {
   const escalation = state.approvals.find((a) => a.kind === "escalation" && a.plan_id === PLAN_NAME && a.status === "pending");
   check("escalation approval pending", Boolean(escalation));
   if (escalation) {
-    // give the director agent a chance to attach its note
+    // give the director agent a chance to attach its note (local/remote model latency)
     let withNote = null;
-    for (let i = 0; i < 30 && !withNote; i++) {
-      await sleep(2000);
+    for (let i = 0; i < 120 && !withNote; i++) {
+      await sleep(3000);
       const s = await getState();
       withNote = s.approvals.find((a) => a.id === escalation.id)?.agent_note ?? null;
     }
@@ -131,9 +131,15 @@ async function main() {
   state = await waitFor("plan done", (s) => s.plans.find((p) => p.id === PLAN_NAME)?.status === "done", 60_000);
   check("plan done", state.plans.find((p) => p.id === PLAN_NAME)?.status === "done");
 
-  // 7. auditor agent notes on gate results
-  const audited = state.gate_results.filter((g) => g.plan_id === PLAN_NAME && g.audit_note);
-  check("auditor agent reviewed gates", audited.length >= 1, `${audited.length}/${gates.length} audited`);
+  // 7. auditor agent notes on gate results (serialized queue; local model latency)
+  let audited = 0;
+  for (let i = 0; i < 120; i++) {
+    const s = await getState();
+    audited = s.gate_results.filter((g) => g.plan_id === PLAN_NAME && g.audit_note).length;
+    if (audited >= 1) break;
+    await sleep(3000);
+  }
+  check("auditor agent reviewed gates", audited >= 1, `${audited}/${gates.length} audited`);
 
   // 8. evidence + artifact validation via protocols/validate.mjs
   const planJobs = state.jobs.filter((j) => j.plan_id === PLAN_NAME);

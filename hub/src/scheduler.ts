@@ -18,10 +18,21 @@ const MAX_GATE_ATTEMPTS = 2; // attempts per activity before escalation
 const rand = () => Math.random().toString(36).slice(2, 6);
 
 export async function tick(): Promise<void> {
+  await pruneStaleNodes();
   await requeueExpiredLeases();
   await promoteReadyActivities();
   await evaluateTerminalGates();
   await finalizePlans();
+}
+
+/** Remove nodes whose heartbeats stopped (stale registrations from redeployments). */
+async function pruneStaleNodes(): Promise<void> {
+  const stale = await pool.query(
+    `DELETE FROM nodes WHERE last_seen < now() - interval '5 minutes' RETURNING id`,
+  );
+  for (const row of stale.rows) {
+    bus.publish("node", { id: row.id, state: "gone" });
+  }
 }
 
 async function requeueExpiredLeases(): Promise<void> {

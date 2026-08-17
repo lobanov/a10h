@@ -6,7 +6,7 @@ Tasklist derived from [DESIGN.md](DESIGN.md). Milestones are sequenced; tasks wi
 
 ## M0 — Repo hygiene & skeleton
 - [x] `git init`, LICENSE, `.gitignore`, `README.md` quick-start (points to DESIGN/PLAN/demo)
-- [x] Repo layout scaffold (hub/ spoke/ protocols/ examples/ docs/ scripts/)
+- [x] Repo layout scaffold (hub/ worker/ protocols/ examples/ docs/ scripts/)
 - [x] `.env.example` with all hub secrets documented (API keys, HF token, git creds)
 
 **Validation:** fresh clone reads coherently; no secrets in tree. ✅ (secrets only in gitignored .env)
@@ -29,13 +29,13 @@ Tasklist derived from [DESIGN.md](DESIGN.md). Milestones are sequenced; tasks wi
 
 **Validation:** ✅ covered end-to-end by scripts/e2e-demo.mjs against the deployed stack (2 fake pullers = compose runner-a/runner-b).
 
-## M3 — Spoke runner
+## M3 — Worker runner
 - [x] Runner service (pull loop, execute container jobs, relay progress/events; multi-file progress.jsonl discovery)
 - [x] Worktree manager: clone/worktree strategies per activity; cleanup policy
-- [x] Compose spoke profile (`runner-a`/`runner-b`), capability tags via env (`NODE_TAGS`)
+- [x] Compose worker profile (`worker-a`/`worker-b`), capability tags via env (`NODE_TAGS`)
 - [x] Resource quota hooks: GPU/memory reservations documented in compose; job containers run as runner uid
 
-**Validation:** ✅ two compose spokes execute demo jobs; runner kill/requeue verified in E2E lease test (host dev run).
+**Validation:** ✅ two compose workers execute demo jobs; runner kill/requeue verified in E2E lease test (host dev run).
 
 ## M4 — Planning graph & gates
 - [x] `plan/graph.yaml` schema: goal ref, activities (DAG edges, job specs/refs), exit gates (criteria, evidence pointers)
@@ -85,7 +85,7 @@ Tasklist derived from [DESIGN.md](DESIGN.md). Milestones are sequenced; tasks wi
 **Validation:** inject a flawed skill demo → reflector proposes fix → A/B worktree run compares outcomes → approved commit lands in git.
 
 ## M10 — Packaging, demo polish, public release
-- [ ] `docker-compose up` one-command hub bootstrap; spoke join via documented profile
+- [ ] `docker-compose up` one-command hub bootstrap; worker join via documented profile
 - [ ] Demo project hardened as canonical quick-start (~1h, no GPU): walkthrough, expected outputs, troubleshooting
 - [ ] README final pass; screenshots; LICENSE; CI (schema tests, integration smoke)
 - [ ] Public release of framework repo
@@ -93,8 +93,8 @@ Tasklist derived from [DESIGN.md](DESIGN.md). Milestones are sequenced; tasks wi
 **Validation:** an outside collaborator (or fresh VM) completes the demo quick-start unaided in ≤1h.
 
 ## P4 (post-release) — Real compute
-- [ ] First real GPU campaign on 5090 spoke (real training job via job protocol)
-- [ ] DGX Spark joins as second spoke; quota profile validated under real inference+training contention
+- [ ] First real GPU campaign on 5090 worker (real training job via job protocol)
+- [ ] DGX Spark joins as second worker; quota profile validated under real inference+training contention
 - [ ] LiteLLM against real local (vLLM) + remote models; tier config finalized for the first real project
 
 ---

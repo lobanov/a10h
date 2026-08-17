@@ -1,7 +1,7 @@
 # Pi Autoresearch Lab — deployment (DESIGN.md §4).
 #
 #   Hub only:        docker compose up -d postgres hub
-#   + spokes (demo): docker compose --profile spoke up -d
+#   + workers (demo): docker compose --profile worker up -d
 #   + LiteLLM:       docker compose --profile litellm up -d   (optional)
 #
 # Copy .env.example to .env first (see scripts/gen-env.sh to import the
@@ -16,6 +16,9 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-autoresearch}
     volumes:
       - ./data/pgdata:/var/lib/postgresql/data
+    ports:
+      # Localhost-bound for dev tooling (BDD suites, psql). Not exposed externally.
+      - "127.0.0.1:${PG_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-autoresearch}"]
       interval: 2s
@@ -46,12 +49,12 @@ services:
       postgres:
         condition: service_healthy
 
-  runner-a:
-    build: ./spoke
-    profiles: ["spoke"]
+  worker-a:
+    build: ./worker
+    profiles: ["worker"]
     environment:
       HUB_URL: http://hub:8080
-      NODE_ID: runner-a
+      NODE_ID: worker-a
       NODE_TAGS: ${NODE_A_TAGS:-cpu:8,mem:8G}
       REPO_PATH: /repo
       CHECKOUT_STRATEGY: clone
@@ -64,12 +67,12 @@ services:
     depends_on:
       - hub
 
-  runner-b:
-    build: ./spoke
-    profiles: ["spoke"]
+  worker-b:
+    build: ./worker
+    profiles: ["worker"]
     environment:
       HUB_URL: http://hub:8080
-      NODE_ID: runner-b
+      NODE_ID: worker-b
       NODE_TAGS: ${NODE_B_TAGS:-cpu:8,mem:8G}
       REPO_PATH: /repo
       CHECKOUT_STRATEGY: clone
@@ -82,19 +85,28 @@ services:
     depends_on:
       - hub
 
-  vllm:
-    # Local auditor model (DESIGN.md §3.5 tier `local`). GGUF served by vLLM.
-    # Requires ./data/vllm-models/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf (see scripts/fetch-models.sh).
-    image: vllm/vllm-openai:latest
+  llamacpp:
+    # Local auditor model (DESIGN.md §3.5 tier `local`). unsloth GGUF quants
+    # target llama.cpp (vLLM 0.27 has no GGUF path); llama-server exposes the
+    # same OpenAI-compatible API on :8000/v1.
+    # Requires ./data/vllm-models/model/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf
+    # (see scripts/fetch-models.sh).
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
     profiles: ["local-llm"]
     volumes:
       - ./data/vllm-models:/models:ro
-    command: >-
-      --model /models/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf
-      --served-model-name gemma-4-26b-it
-      --port 8000
-      --max-model-len 8192
-      --gpu-memory-utilization 0.90
+    command:
+      - "-m"
+      - "/models/model/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"
+      - "--port"
+      - "8000"
+      - "-c"
+      - "8192"
+      - "-ngl"
+      - "99"
+      - "--alias"
+      - "gemma-4-26b-it"
+      - "--jinja"
     deploy:
       resources:
         reservations:
@@ -103,7 +115,7 @@ services:
               count: all
               capabilities: [gpu]
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/v1/models')"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || wget -qO- http://localhost:8000/health"]
       interval: 10s
       timeout: 5s
       retries: 60

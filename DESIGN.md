@@ -19,7 +19,7 @@ A multi-agent system (MAS) that operates a research lab for **experimental resea
 | 4 | Ad hoc chat about ongoing work | Dashboard chat, backed by pi sessions |
 | 5 | Hybrid inference (RTX 5090, DGX Spark, remote APIs) | LiteLLM gateway + per-project model-tier config; compose resource quotas on shared nodes |
 | 6 | Agent hierarchy (director, workers, auditor, librarian) | pi SDK sessions in containers; roster in §5 |
-| 7 | docker-compose deployment | Framework repo bootstraps via `docker-compose up`; spokes join by running their compose profile |
+| 7 | docker-compose deployment | Framework repo bootstraps via `docker-compose up`; workers join by running their compose profile |
 | 8 | Standard job protocol w/ progress/ETA; observable agentic work | Stack-agnostic job protocol (§6); all events land in hub Postgres and stream to the dashboard |
 | 9 | Planning graph with gates, reviewed before execution | Planning graph + gate lifecycle (§5.3); human approves goal/first plan/substantial changes |
 
@@ -52,13 +52,13 @@ A multi-agent system (MAS) that operates a research lab for **experimental resea
              pull work (HTTP) +    │                   │  serve jobs over
              push status (SSE)     │                   ▼  pull-only HTTP+SSE
                         ┌──────────┴─────────┐   ┌────────────────────┐   ┌────────────────────┐
-                        │ SPOKE: 5090 host   │   │ SPOKE: DGX Spark   │   │ SPOKE: future node │
+                        │ WORKER: 5090 host  │   │ WORKER: DGX Spark  │   │ WORKER: future node│
                         │ runner + jobs      │   │ runner + jobs      │   │ runner + jobs      │
                         │ (+ optional vLLM)  │   │ (+ optional vLLM)  │   │                    │
                         └────────────────────┘   └────────────────────┘   └────────────────────┘
 ```
 
-**One rule makes the topology simple:** spokes never accept inbound connections and never touch Postgres. They *pull* work from the hub over HTTP and *stream* status back over SSE. Any node that can reach the hub URL can join.
+**One rule makes the topology simple:** workers never accept inbound connections and never touch Postgres. They *pull* work from the hub over HTTP and *stream* status back over SSE. Any node that can reach the hub URL can join.
 
 ---
 
@@ -66,24 +66,24 @@ A multi-agent system (MAS) that operates a research lab for **experimental resea
 
 ### 3.1 Pi as the runtime primitive everywhere
 
-- Every agent role (director, workers, auditor, librarian, reflector) is a **pi agent session** driven through the pi SDK (`createAgentSession`) inside containers. No bespoke agent runtime.
+- Every agent role (director, workers, auditor, librarian, reflector) is a **pi agent session** driven through the pi SDK (`createAgentSession`) inside containers. No beworker agent runtime.
 - Research-lab capabilities are **pi extensions** (custom tools + lifecycle hooks): job protocol tools, gate/audit tools, librarian indexing, dashboard event bridge.
 - **Hybrid adoption:** community pi packages (subagent orchestration, observability, etc.) are *evaluated and adopted where they fit*; research-specific pieces are purpose-built. Package evaluation is an explicit workstream (see PLAN.md M5), not a one-time choice.
 - Dashboard chat is backed by pi sessions via a chat bridge in the supervisor.
 
-### 3.2 Hub-and-spoke, pull-only, multi-node from day one
+### 3.2 Hub-and-worker, pull-only, multi-node from day one
 
 - Hub runs supervisor, Postgres, dashboard, LiteLLM — one docker-compose stack.
-- Spokes run a runner service (+ optional model server). They register by polling the hub's work endpoint.
-- Resilience: spokes hold **leases** on jobs with heartbeats; the hub re-queues work when leases expire; SSE streams resume with last-event IDs. Cancellation latency is bounded by the poll interval (tunable).
-- Multi-node (5090 box + DGX Spark + future) is a **v1 requirement**, exercised by the demo (two simulated spokes), not deferred.
+- Workers run a runner service (+ optional model server). They register by polling the hub's work endpoint.
+- Resilience: workers hold **leases** on jobs with heartbeats; the hub re-queues work when leases expire; SSE streams resume with last-event IDs. Cancellation latency is bounded by the poll interval (tunable).
+- Multi-node (5090 box + DGX Spark + future) is a **v1 requirement**, exercised by the demo (two simulated workers), not deferred.
 
 ### 3.3 State: hub-only Postgres; artifacts: git + HuggingFace
 
 - **Postgres (hub only):** job lifecycle, progress events, agent activity, gate decisions, audit results, approval queue. Append-heavy, event-oriented schema; the dashboard is a live projection.
 - **Project repo (git):** code, configs, planning graphs, skills, reports, metrics (small JSON/CSV), retrospectives, audit reports. This is the durable research record.
 - **HuggingFace Hub:** checkpoints, datasets, and other large artifacts. Artifact lineage records **both** locations (git commit ↔ HF revision), and the librarian indexes both.
-- Spokes get repo access via mounted credentials/worktrees; nothing durable ever lives only inside a container.
+- Workers get repo access via mounted credentials/worktrees; nothing durable ever lives only inside a container.
 
 ### 3.4 Two-repo bootstrap model
 
@@ -95,15 +95,15 @@ A multi-agent system (MAS) that operates a research lab for **experimental resea
 
 - All agent inference (and optionally local model serving) flows through **LiteLLM**: remote APIs (Anthropic, OpenAI, …) and local servers (vLLM on the 5090/Spark) behind one OpenAI-style endpoint.
 - **Role→model mapping is per-project configuration**, backed by a **model-tier registry** (e.g., `small`, `mid`, `strong`, `strongest`) that also drives the escalation ladder's "second opinion from a more capable model."
-- **Resource contention policy:** when inference and experiment compute share a node, the spoke's compose profile enforces resource quotas (GPU memory/CPU reservations & limits). Soft quotas are imperfect (no hard VRAM isolation without MIG); the policy is documented, and heavy training campaigns may instead schedule on nodes without a resident model server.
+- **Resource contention policy:** when inference and experiment compute share a node, the worker's compose profile enforces resource quotas (GPU memory/CPU reservations & limits). Soft quotas are imperfect (no hard VRAM isolation without MIG); the policy is documented, and heavy training campaigns may instead schedule on nodes without a resident model server.
 
 ---
 
 ## 4. Deployment model (docker-compose)
 
 - **Hub compose stack:** `supervisor`, `postgres`, `dashboard`, `litellm`. GPU services optional.
-- **Spoke compose profile:** `runner` (+ optional `vllm`). Same image family, different profile/env (`HUB_URL`, node labels like `gpu=rtx5090`, capability tags).
-- Scheduling: jobs declare requirements (e.g., `gpu: true`, `vram: 24GB`, `stack: pytorch`); the hub matches against spoke capability tags and lease capacity.
+- **Worker compose profile:** `runner` (+ optional `vllm`). Same image family, different profile/env (`HUB_URL`, node labels like `gpu=rtx5090`, capability tags).
+- Scheduling: jobs declare requirements (e.g., `gpu: true`, `vram: 24GB`, `stack: pytorch`); the hub matches against worker capability tags and lease capacity.
 - Secrets: hub-side `.env` (API keys, HF token, git credentials) never enters the public repo; a `.env.example` documents required variables.
 
 ---
@@ -209,10 +209,10 @@ timeout_s: 3600
 ## 9. Phased rollout
 
 1. **P0 — Protocols & demo scaffold (this session):** design doc, PLAN.md, demo project (simulated, no GPU).
-2. **P1 — Job plane:** hub API + Postgres + SSE, runner, job protocol v0, two simulated spokes. *Demo jobs run end-to-end.*
+2. **P1 — Job plane:** hub API + Postgres + SSE, runner, job protocol v0, two simulated workers. *Demo jobs run end-to-end.*
 3. **P2 — Governance plane:** planning-graph engine, gates, director + worker + auditor agents, approval inbox.
 4. **P3 — Experience:** dashboard ops view + chat bridge; reflector + librarian.
-5. **P4 — Real compute:** first real GPU campaign on the 5090; Spark joins as second spoke; LiteLLM + tier config against real models.
+5. **P4 — Real compute:** first real GPU campaign on the 5090; Spark joins as second worker; LiteLLM + tier config against real models.
 
 ---
 

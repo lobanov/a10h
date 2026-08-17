@@ -59,7 +59,7 @@ Schema: [`progress.schema.json`](progress.schema.json)
 
 ## 4. Lease & cancellation semantics
 
-- Spokes **pull** work (`GET /api/work?node=<id>`); a granted job is leased
+- Workers **pull** work (`GET /api/work?node=<id>`); a granted job is leased
   with a TTL renewed by heartbeats/status/event posts.
 - Lease expiry (runner death, network partition) → job re-queued with
   `attempt+1`, capped by the hub's retry policy; the demo exposes the requeue
