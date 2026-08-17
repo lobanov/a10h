@@ -2,6 +2,18 @@
 
 Tasklist derived from [DESIGN.md](DESIGN.md). Milestones are sequenced; tasks within a milestone are parallelizable unless noted. Each milestone ends with a **validation gate** (all runnable without GPU hardware except P4).
 
+**Single timeline** — completed stages (M0–M6) are kept below as-built; all upcoming work is deduplicated into one sequence: **R1→R7 (git plane + worker-agent refinement), then M7→M10, then P4**.
+
+| Order | Stage | Scope | Ordered here because |
+|---|---|---|---|
+| done | M0–M6 | protocols, job plane, worker, governance, agents (director/auditor), dashboard ops + approvals | as-built |
+| 1–7 | R1 → R7 | gitserver+CA+tokens · task branches + pre-receive policy · checkout rework · SSE worker protocol · gates/auditor on committed state · librarian-as-secretary · demo seeding + validation rework | re-architects the core planes first so every later feature builds on final mechanics |
+| 8 | M7 | approvals & gates UX polish (deduped against M6) | renders the final event model landed by R7 |
+| 9 | M8 | chat bridge (pi sessions, dashboard panel) | context injection reads the final state model |
+| 10 | M9 | reflector + skill-change pipeline (librarian scope moved to R6) | A/B runs go through the git plane |
+| 11 | M10 | packaging, demo polish, public release | needs everything above stable |
+| 12 | P4 | real compute (first GPU campaign, Spark joins) | post-release by definition |
+
 ---
 
 ## M0 — Repo hygiene & skeleton
@@ -64,38 +76,6 @@ Tasklist derived from [DESIGN.md](DESIGN.md). Milestones are sequenced; tasks wi
 - [x] Agent log view; minimal auth (token), single-user
 
 **Validation:** ✅ operator watches the E2E run live at http://localhost:8080; SSE resumes via since/Last-Event-ID (ring-buffer replay).
-
-## M7 — Dashboard: approvals & gates UX
-- [ ] Approval inbox: plan approvals (structured plan rendering), substantial changes, escalations, gate-audit summaries; approve/reject with comment
-- [ ] Gate results view: criteria checklist, evidence links, auditor reasoning
-
-**Validation:** full governance loop from the browser: approve plan → observe run → handle one forced escalation.
-
-## M8 — Chat bridge
-- [ ] Supervisor chat service: pi-session-backed conversations with any role; history in Postgres; context injection (current plan/job state)
-- [ ] Dashboard chat panel
-
-**Validation:** operator asks "why did gate 3 fail?" mid-run; the addressed role answers with correct job context.
-
-## M9 — Reflector & librarian
-- [ ] Reflector: aggregates retrospectives + audit anomalies → proposals (plan/skill changes) → director approval flow
-- [ ] Librarian: artifact registry (git commit ↔ HF revision), taxonomy/indices of lessons, literature notes; indexing jobs via job protocol
-- [ ] Skill-change pipeline: proposal → (optional) worktree A/B on identical inputs → commit on approval
-
-**Validation:** inject a flawed skill demo → reflector proposes fix → A/B worktree run compares outcomes → approved commit lands in git.
-
-## M10 — Packaging, demo polish, public release
-- [ ] `docker-compose up` one-command hub bootstrap; worker join via documented profile
-- [ ] Demo project hardened as canonical quick-start (~1h, no GPU): walkthrough, expected outputs, troubleshooting
-- [ ] README final pass; screenshots; LICENSE; CI (schema tests, integration smoke)
-- [ ] Public release of framework repo
-
-**Validation:** an outside collaborator (or fresh VM) completes the demo quick-start unaided in ≤1h.
-
-## P4 (post-release) — Real compute
-- [ ] First real GPU campaign on 5090 worker (real training job via job protocol)
-- [ ] DGX Spark joins as second worker; quota profile validated under real inference+training contention
-- [ ] LiteLLM against real local (vLLM) + remote models; tier config finalized for the first real project
 
 ---
 
@@ -163,23 +143,61 @@ Source: DESIGN.md v1.1 (§3.2.1 git plane, §3.3 state model, §3.4 skills, §4 
 
 **Acceptance:** full e2e green on the deployed R-stack (all prior 20 checks reworked + new git-plane checks); both BDD suites green; demo quick-start (Part E) updated and passing; skill updated.
 
-### R-series dependency order
+---
+
+## M7 — Dashboard: approvals & gates UX polish
+*M6 already shipped the live approval inbox, gate results view, and agent log; M7 keeps only the polish deltas. Ordered after R7, which finalizes the event model (branch/merge/attempt-note events) these views render.*
+
+- [ ] Structured plan rendering inside approval cards (goal, activities, gates)
+- [ ] Substantial-change cards and gate-audit summaries in the inbox
+- [ ] Approve/reject/resolve **with comment**; evidence links + auditor reasoning surfaced from committed state (R5)
+- [ ] Attempt-history browsing: preserved task branches + librarian summary notes (built on R7's feed events)
+
+**Validation:** full governance loop from the browser on the R-stack: approve plan → watch run incl. one audited merge and one failed-repair note → resolve a forced escalation with comment.
+
+## M8 — Chat bridge
+*Ordered after the R-series: chat context injection reads the final state model (committed evidence, merged main). No hard dependency — can be pulled earlier in parallel if desired.*
+
+- [ ] Supervisor chat service: pi-session-backed conversations with any role; history in Postgres; context injection (current plan/job state)
+- [ ] Dashboard chat panel
+
+**Validation:** operator asks "why did gate 3 fail?" mid-run; the addressed role answers with correct job context.
+
+## M9 — Reflector & skill-change pipeline
+*Librarian scope moved to R6 (secretary/work-handoff, retention, lineage index). M9 keeps reflection and skill evolution.*
+
+- [ ] Reflector: aggregates retrospectives + audit anomalies → proposals (plan/skill changes) → director approval flow
+- [ ] Skill-change pipeline: proposal → optional **A/B on identical inputs** (branch-based: two task-style checkouts — worker worktrees were removed in R3) → commit on approval via the git plane
+
+**Validation:** inject a flawed skill demo → reflector proposes fix → branch-based A/B run compares outcomes → approved commit lands in git.
+
+## M10 — Packaging, demo polish, public release
+- [ ] One-command `docker-compose up` verified on a fresh clone (reuses the R1 bootstrap: CA, bare repos, tokens, demo seeding); worker join via documented profile
+- [ ] Demo project hardened as canonical quick-start (~1h, no GPU): walkthrough, expected outputs, troubleshooting (builds on R7's reworked quick-start)
+- [ ] README final pass; screenshots; LICENSE; CI (schema tests, integration smoke)
+- [ ] Public release of framework repo
+
+**Validation:** an outside collaborator (or fresh VM) completes the demo quick-start unaided in ≤1h.
+
+## P4 (post-release) — Real compute
+- [ ] First real GPU campaign on 5090 worker (real training job via job protocol)
+- [ ] DGX Spark joins as second worker; quota profile validated under real inference+training contention
+- [ ] LiteLLM against real local (vLLM) + remote models; tier config finalized for the first real project
+
+---
+
+## Dependency order (single timeline)
 
 ```
-R1 → R2 → R3 → R4 → R5 → R6 → R7
-     (R4 can start after R2: instruction schema needs task-branch concepts;
-      R5 needs R4 for rebase instructions; R6 needs R4+R5; R7 last)
+Done:     M0 → M1 → M2 → M3 → M4 → M5 → M6
+Upcoming: R1 → R2 → R3 → R4 → R5 → R6 → R7 → M7 → M8 → M9 → M10 → P4
 ```
 
-## Dependency order
-
-```
-M0 → M1 → M2 → M3 → M4 → M5 → M6 → M7 → M8 → M9 → M10 → R-series → P4
-                (M4 can start after M2; M5 spike after M3)
-R1 → R2 → R3 → R4 → R5 → R6 → R7   (R4 startable after R2; R7 last)
-```
+- Within the R-series: R3 needs R1+R2; R4 can start after R2 (instruction schema needs task-branch concepts); R5 needs R3+R4 (rebase instructions); R6 needs R4+R5; R7 closes the series.
+- M7–M9 have no hard R-dependency beyond what they consume (M7 renders R7's events; M8's context injection reads the final state model; M9's A/B uses the git plane) — M8 may run in parallel with M7/M9 if desired.
+- M10 waits for everything above; P4 is post-release by definition.
 
 ## Standing workstreams
 
-- **Community package evaluation** (starts M5, ongoing): each candidate gets an adopt/skip memo in `docs/adr/`.
-- **Skill library growth** (starts M9, ongoing): skills evolve with research; all changes through governance.
+- **Community package evaluation** (started M5, ongoing): each candidate gets an adopt/skip memo in `docs/adr/`.
+- **Skill library growth** (starts R6, ongoing): skills evolve with research; all changes through governance.

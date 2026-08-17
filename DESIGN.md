@@ -106,7 +106,7 @@ The hub serves research project repos over **HTTPS** via a lean **gitserver side
 
 - **Framework repo (this repo, public):** compose stack, supervisor, extensions, dashboard, protocol specs, demo. `git clone && docker-compose up` bootstraps the lab.
 - **Project repo (per research project, private/public case-by-case):** goal, planning graphs, experiment code, task-specific worker skills, artifacts. Served by the hub's gitserver; workers do a **full in-container checkout per task** (clone from the gitserver URL with CA + token; checkout the task branch; delete on task end). **No worktrees; no `/repo` bind mount on workers.**
-- Skills are versioned repo artifacts: agents propose skill edits; changes land via the same gate/audit/approval flow as any other work, are auditable in git history, and can be **A/B-tested in a separate worktree on identical inputs** when the director or human decides.
+- Skills are versioned repo artifacts: agents propose skill edits; changes land via the same gate/audit/approval flow as any other work, are auditable in git history, and can be **A/B-tested on identical inputs** (branch-based A/B — two task-style checkouts; worker worktrees are removed by R3) when the director or human decides.
 - **Skill placement:** role-shaping skills (auditor, reflector, librarian personas — hub-side role concerns) live in the **framework repo**; project repos carry only **worker-task-specific skills**. (The demo project's role skills migrate to framework level in R7.)
 
 ### 3.5 Hybrid inference + model tiers
@@ -163,7 +163,7 @@ The hub serves research project repos over **HTTPS** via a lean **gitserver side
 **Reflective learning**
 1. Every exit produces a worker retrospective (part of the gate bundle).
 2. Reflector aggregates retrospectives + audit anomalies and proposes plan/skill changes.
-3. Director approves or escalates to human; approved skill changes are committed to the project repo (auditable), optionally A/B-tested in a worktree on identical inputs first.
+3. Director approves or escalates to human; approved skill changes are committed to the project repo (auditable), optionally A/B-tested on identical inputs first (branch-based A/B, M9).
 
 ### 5.3 Planning graph
 
@@ -232,8 +232,8 @@ All **hub-initiated worker instructions** are SSE events — one standard channe
 2. **P1 — Job plane: done** (hub API + Postgres + SSE, worker runner, two compose workers; E2E-verified incl. lease-expiry requeue).
 3. **P2 — Governance plane: done** (planning-graph engine, mechanical gates, repair→escalation, director + auditor agents, approval inbox).
 4. **P3 — Experience: partial** (dashboard ops view + approvals live; chat bridge M8; reflector automation M9).
-5. **R-series — Git plane + worker-agent refinement (designed; PLAN.md):** R1 gitserver+CA+tokens → R2 task branches+hook → R3 in-container checkout rework → R4 SSE worker protocol (sessions, instructions, register-then-offer) → R5 auditor/gates on committed state → R6 librarian-as-secretary → R7 demo seeding hub-side + validation rework.
-6. **P4 — Real compute (after R-series):** first real GPU campaign on the 5090; Spark joins as a second worker; tier config against real models.
+5. **R-series — Git plane + worker-agent refinement (designed; PLAN.md):** R1 gitserver+CA+tokens → R2 task branches+hook → R3 in-container checkout rework → R4 SSE worker protocol (sessions, instructions, register-then-offer) → R5 auditor/gates on committed state → R6 librarian-as-secretary → R7 demo seeding hub-side + validation rework. The R-series leads the single upcoming timeline (PLAN.md); the P3/M-series remainder follows it: M7 approvals/gates UX polish, M8 chat bridge, M9 reflector + skill-change pipeline, M10 packaging & public release.
+6. **P4 — Real compute (post-release):** first real GPU campaign on the 5090; Spark joins as a second worker; tier config against real models.
 
 ---
 
