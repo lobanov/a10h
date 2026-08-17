@@ -74,25 +74,6 @@
         }
       }
     },
-    "inputs_evidence": {
-      "type": "array",
-      "description": "Upstream activities' evidence materialized into the checkout pre-run (hub-populated).",
-      "items": {
-        "type": "object",
-        "required": [
-          "path",
-          "content"
-        ],
-        "properties": {
-          "path": {
-            "type": "string"
-          },
-          "content": {
-            "type": "string"
-          }
-        }
-      }
-    },
     "timeout_s": {
       "type": "number",
       "minimum": 1

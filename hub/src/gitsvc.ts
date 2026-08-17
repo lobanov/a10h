@@ -287,7 +287,17 @@ export async function landBranch(
   planId: string | null,
   activity: string,
   jobId?: string,
+  expectedSha?: string,
 ): Promise<LandingResult> {
+  // Verified-complete is exact: if the caller pinned a verified SHA and the
+  // tip moved since (late append), refuse — a new verification round must
+  // cover the new tip before anything merges.
+  if (expectedSha) {
+    const t = await gitRevParse(repo, taskRef(planId ?? "adhoc", activity));
+    if (t && t !== expectedSha) {
+      return { repo, branch: taskRef(planId ?? "adhoc", activity), outcome: "held_rebase", main: t };
+    }
+  }
   const branch = taskRef(planId ?? "adhoc", activity);
   return withRepoLock(repo, async () => {
     const dir = repoDir(repo);
@@ -297,7 +307,17 @@ export async function landBranch(
     );
     if (!tip) throw new Error(`no task branch ${branch} in ${repo}`);
     const mainSha = (await git(dir, ["rev-parse", "main"])).stdout.trim();
-    if (tip === mainSha) return { repo, branch, outcome: "nothing_to_merge", main: mainSha };
+    if (tip === mainSha) {
+      // Branch == main (content already landed or base pass): record it so
+      // dependents unblock and the plan can complete (else: silent deadlock).
+      if (planId !== null) {
+        await pool.query(
+          `UPDATE activities SET merged_sha = $1, updated_at = now() WHERE plan_id = $2 AND id = $3`,
+          [tip, planId, activity],
+        );
+      }
+      return { repo, branch, outcome: "nothing_to_merge", main: mainSha };
+    }
     const ancestor = await git(dir, ["merge-base", "--is-ancestor", "main", branch]).then(
       () => true,
       () => false,
@@ -425,9 +445,18 @@ export async function readEvidenceAt(
   const out: Array<{ path: string; content: string }> = [];
   for (const p of declared) {
     if (!/^[A-Za-z0-9._\/-]+$/.test(p) || p.includes("..")) continue;
+    // Must be a BLOB (git show on a directory "succeeds" with a listing).
+    const t = await git(dir, ["cat-file", "-t", `${sha}:${p}`]).catch(() => null);
+    if (!t || t.stdout.trim() !== "blob") continue;
     const r = await git(dir, ["show", `${sha}:${p}`]).catch(() => null);
     if (!r) continue;
-    out.push({ path: p, content: r.stdout.slice(0, maxBytes) });
+    // Cap at a line boundary (never cut mid-JSON).
+    let content = r.stdout;
+    if (content.length > maxBytes) {
+      const cut = content.lastIndexOf("\n", maxBytes);
+      content = content.slice(0, cut > 0 ? cut : maxBytes);
+    }
+    out.push({ path: p, content });
   }
   return out;
 }

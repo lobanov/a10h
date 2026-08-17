@@ -19,6 +19,7 @@ import {
   sessionForNode,
   emitInstruction,
 } from "./sessions.ts";
+import { gitRevParse } from "./gitsvc.ts";
 
 /**
  * Hub HTTP API (DESIGN.md §3.2, §4). Pull-only hub-workers: workers call
@@ -288,6 +289,22 @@ export function createHttpServer(): ReturnType<typeof createHttpServerRaw> {
         // must not overwrite the live attempt's state.
         if (typeof body.attempt === "number" && body.attempt !== job.rows[0].attempt) {
           return json(res, 409, { error: `stale attempt ${body.attempt} (current: ${job.rows[0].attempt})` });
+        }
+        // Ownership: only the leasing node reports state for this job.
+        const claimedNode = (body as { node?: string }).node;
+        if (job.rows[0].node && claimedNode && claimedNode !== job.rows[0].node) {
+          return json(res, 409, { error: "job leased by another node" });
+        }
+        // M4: pushed_sha must BE the task branch tip at receipt (the worker
+        // pushes before reporting terminal state) — a fabricated or stale
+        // SHA cannot smuggle unverified content into gate evaluation.
+        if (body.state && body.state !== "running" && body.pushed_sha && job.rows[0].branch) {
+          const tip = await gitRevParse(job.rows[0].repo ?? "demo", job.rows[0].branch);
+          if (tip !== body.pushed_sha) {
+            return json(res, 409, {
+              error: `pushed_sha is not the branch tip (tip moved or SHA forged); re-push then re-report`,
+            });
+          }
         }
         if (body.state === "running") {
           // Lease renewal from a live runner (silent jobs emit no progress events).

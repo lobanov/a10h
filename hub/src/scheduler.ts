@@ -1,7 +1,7 @@
 import { pool } from "./db.ts";
 import { bus } from "./bus.ts";
 import { evaluateCriteria, type Criterion, type EvidenceFile } from "./gates.ts";
-import { queueAudit, queueDirector } from "./agents.ts";
+import { queueAudit, queueDirector, agentConfig } from "./agents.ts";
 import {
   createTaskBranch,
   landBranch,
@@ -30,11 +30,24 @@ import {
 
 export const LEASE_TTL_S = 30;
 const MAX_JOB_ATTEMPTS = 3; // lease-expiry requeues per job
-const MAX_GATE_ATTEMPTS = 2; // attempts per activity before escalation
+const MAX_GATE_ATTEMPTS = 3; // initial + two failed repairs, then escalation (DESIGN §5.2)
 
 const rand = () => Math.random().toString(36).slice(2, 6);
 
+let tickInFlight = false;
 export async function tick(): Promise<void> {
+  // Mutex: status-POST ticks and the interval tick must not interleave
+  // (duplicate gate results, retrospective prompts, audits).
+  if (tickInFlight) return;
+  tickInFlight = true;
+  try {
+  await tickInner();
+  } finally {
+    tickInFlight = false;
+  }
+}
+
+async function tickInner(): Promise<void> {
   const t0 = Date.now();
   const phase = async (name: string, fn: () => Promise<void>) => {
     const start = Date.now();
@@ -198,6 +211,59 @@ async function promoteReadyActivities(): Promise<void> {
   }
 }
 
+/** Audit-note verdict: true (agree_pass), false (dispute/agree_fail on a
+ * passing gate), null (pending/unparseable). */
+function auditNoteAgrees(note: unknown): boolean | null {
+  if (typeof note !== "string" || !note) return null;
+  try {
+    const parsed = JSON.parse(note) as { verdict?: string };
+    if (parsed.verdict === "agree_pass") return true;
+    if (parsed.verdict === "dispute" || parsed.verdict === "agree_fail") return false;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+const MAX_REBASE_ROUNDS = 3;
+
+/** Rebase instruction, once per stall window; after MAX_REBASE_ROUNDS the
+ * landing escalates to the operator instead of looping forever (M6). */
+async function maybeEmitRebaseInstruction(
+  repo: string,
+  planId: string,
+  activity: string,
+  jobId: string | null,
+  branch: string,
+): Promise<void> {
+  const result = await landBranch(repo, planId, activity, jobId ?? undefined);
+  if (result.outcome !== "held_rebase") return;
+  const rounds = await pool.query(
+    `SELECT count(*) c FROM rebase_instructions WHERE repo = $1 AND branch = $2`,
+    [repo, branch],
+  );
+  if ((rounds.rows[0]?.c ?? 0) > MAX_REBASE_ROUNDS) {
+    await createEscalation(planId, activity, 0,
+      [{ id: "landing", ok: false, detail: `rebase rounds exhausted (${MAX_REBASE_ROUNDS})` }],
+      "landing stalled: rebase rounds exhausted");
+    return;
+  }
+  if (!result.instruction?.fresh) return;
+  const nodeRow = jobId
+    ? await pool.query(`SELECT node FROM jobs WHERE id = $1`, [jobId])
+    : { rows: [] as Array<{ node?: string }> };
+  const node = nodeRow.rows[0]?.node as string | undefined;
+  const session = node ? await sessionForNode(node) : null;
+  if (session) {
+    await emitInstruction(session, "rebase", {
+      repo,
+      branch,
+      target_main_sha: result.instruction.target_main_sha,
+      job_id: jobId,
+    });
+  }
+}
+
 /** Promote one ready activity to a queued job (R2: pre-created task branch). */
 async function promoteOneActivity(
   repo: string,
@@ -251,11 +317,34 @@ async function evaluateTerminalGates(): Promise<void> {
      WHERE j.status IN ('succeeded', 'failed', 'cancelled')`,
   );
   for (const job of rows.rows) {
-    await pool.query(
-      `UPDATE activities SET status = 'gate_check', updated_at = now() WHERE plan_id = $1 AND id = $2`,
-      [job.plan_id, job.activity],
-    );
-    await runGateEvaluation(job);
+    try {
+      await pool.query(
+        `UPDATE activities SET status = 'gate_check', updated_at = now() WHERE plan_id = $1 AND id = $2`,
+        [job.plan_id, job.activity],
+      );
+      await runGateEvaluation(job);
+    } catch (e) {
+      // One failing gate evaluation must not strand the tick or other jobs.
+      console.error(`[scheduler] gate eval ${job.plan_id}/${job.activity} failed:`, (e as Error).message);
+      await pool.query(
+        `UPDATE activities SET status = 'running', updated_at = now() WHERE plan_id = $1 AND id = $2`,
+        [job.plan_id, job.activity],
+      ).catch(() => undefined);
+    }
+  }
+  // Recovery: activities stranded in gate_check (a prior throw between the
+  // status update and the evaluation) are re-evaluated.
+  const stranded = await pool.query(
+    `SELECT j.id, j.plan_id, j.activity, j.status FROM activities a
+     JOIN jobs j ON j.id = a.job_id
+     WHERE a.status = 'gate_check' AND j.status IN ('succeeded','failed','cancelled')`,
+  );
+  for (const job of stranded.rows) {
+    try {
+      await runGateEvaluation(job);
+    } catch {
+      /* recovery is best-effort; the normal path logs */
+    }
   }
 }
 
@@ -340,6 +429,10 @@ export async function runGateEvaluation(job: {
     bus.publish("activity", { plan_id: job.plan_id, activity: job.activity, status: "passed", attempt: act.attempt });
     // R4: retrospective prompt as an instruction (canned until the secretary
     // owns it in R6) — the worker's agent consumes it as a turn input.
+    // Retrospective prompts go out ONLY on the worker original submission
+    // round (no shaOverride) — re-verification rounds must not re-prompt
+    // (the append would move the tip and loop).
+    if (!shaOverride) {
     const jobRow = await pool.query(`SELECT node FROM jobs WHERE id = $1`, [job.id]);
     const node = jobRow.rows[0]?.node as string | undefined;
     if (node) {
@@ -357,6 +450,7 @@ export async function runGateEvaluation(job: {
           ].join("\n"),
         });
       }
+    }
     }
   } else {
     if (act.attempt < MAX_GATE_ATTEMPTS) {
@@ -495,15 +589,31 @@ async function landVerifiedActivities(): Promise<void> {
       const branch = taskRefOf(row.plan_id, row.activity);
       const tip = await gitRevParse(repo, branch);
       if (!tip) continue;
+      const auditAgrees = auditNoteAgrees(latest?.audit_note);
+      const agentsEnabled = agentConfig().enabled;
       const verified =
         latest &&
         latest.verdict === "pass" &&
-        latest.audit_note !== null &&
-        latest.evaluated_sha === tip;
+        latest.evaluated_sha === tip &&
+        // M3: the audit VERDICT gates the merge (dispute never merges);
+        // with agents disabled, mechanical verification stands alone
+        // (agents augment, never block — documented fallback).
+        (agentsEnabled ? auditAgrees === true : true);
       if (!verified) {
-        // Re-verification round on the current tip: is it a descendant of
-        // main (rebase done or content appended) or does main still diverge
-        // (rebase instruction needed first)?
+        // WAIT state: this exact tip already passed the gate and the audit
+        // is still pending — never re-gate a covered tip (audit latency
+        // would duplicate rounds forever).
+        if (latest && latest.verdict === "pass" && latest.evaluated_sha === tip && agentsEnabled && auditAgrees === null) {
+          continue;
+        }
+        // M3: an audit DISPUTE on the covered tip escalates (never merges).
+        if (auditAgrees === false) {
+          await createEscalation(row.plan_id, row.activity, 0,
+            [{ id: "audit", ok: false, detail: "audit disputed the gate verdict" }],
+            "auditor disputed verification");
+          continue;
+        }
+        // Tip NOT covered by the latest gate result: re-verify at the tip.
         const descendant = await gitIsAncestor(repo, "main", branch);
         if (descendant) {
           const jobRow2 = await pool.query(
@@ -513,25 +623,13 @@ async function landVerifiedActivities(): Promise<void> {
           if (jobRow2.rows[0]) {
             await runGateEvaluation(jobRow2.rows[0], tip); // re-gate + re-audit at tip
           }
+          continue; // NEVER merge in the same round as a fresh verification
         }
-        // non-descendant: emit rebase instruction (below via landBranch hold)
-        const result0 = await landBranch(repo, row.plan_id, row.activity, row.job_id);
-        if (result0.outcome === "held_rebase" && result0.instruction?.fresh) {
-          const jobRow = await pool.query(`SELECT node FROM jobs WHERE id = $1`, [row.job_id]);
-          const node = jobRow.rows[0]?.node as string | undefined;
-          const session = node ? await sessionForNode(node) : null;
-          if (session) {
-            await emitInstruction(session, "rebase", {
-              repo,
-              branch,
-              target_main_sha: result0.instruction.target_main_sha,
-              job_id: row.job_id,
-            });
-          }
-        }
+        // main diverged: rebase instruction (once per stall window; M6 caps).
+        await maybeEmitRebaseInstruction(repo, row.plan_id, row.activity, row.job_id, branch);
         continue;
       }
-      const result = await landBranch(repo, row.plan_id, row.activity, row.job_id);
+      const result = await landBranch(repo, row.plan_id, row.activity, row.job_id, row.job_id ? tip : undefined);
       bus.publish("activity", {
         plan_id: row.plan_id,
         activity: row.activity,

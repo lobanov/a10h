@@ -34,7 +34,6 @@ export interface JobSpec {
   command: string[];
   requirements: Record<string, unknown>;
   outputs: { evidence?: string[]; artifacts?: string[] };
-  inputs_evidence?: Array<{ path: string; content: string }>;
   workspace_subdir?: string | null;
   timeout_s: number;
   attempt?: number;
@@ -320,14 +319,6 @@ export async function executeJob(job: JobSpec): Promise<void> {
     const workspace = join(checkoutDir, job.workspace_subdir ?? "");
     if (!existsSync(workspace)) throw new Error(`workspace subdir missing: ${job.workspace_subdir}`);
 
-    // Materialize upstream evidence into the checkout (cross-activity data flow).
-    for (const file of job.inputs_evidence ?? []) {
-      const dest = join(workspace, file.path);
-      mkdirSync(dirname(dest), { recursive: true });
-      writeFileSync(dest, file.content);
-      console.log(`[${NODE_ID}] job ${job.id}: materialized input ${file.path}`);
-    }
-
     console.log(`[${NODE_ID}] hosting workload as subprocess (declared stack image: ${job.image})`);
 
     let handle: WorkloadHandle | null = null;
@@ -381,7 +372,13 @@ export async function executeJob(job: JobSpec): Promise<void> {
     console.log(`[${NODE_ID}] job ${job.id}: task-branch push ${push.detail}`);
     const statusRes = await hub(`/api/jobs/${job.id}/status`, {
       method: "POST",
-      body: JSON.stringify({ state, exit_code: exitCode, attempt: job.attempt, pushed_sha: push.sha ?? undefined }),
+      body: JSON.stringify({
+        state,
+        exit_code: exitCode,
+        attempt: job.attempt,
+        pushed_sha: push.sha ?? undefined,
+        node: NODE_ID,
+      }),
     });
     if (!statusRes.ok) {
       console.log(`[${NODE_ID}] job ${job.id}: terminal status POST rejected (${statusRes.status}) — attempt superseded`);
@@ -394,55 +391,9 @@ export async function executeJob(job: JobSpec): Promise<void> {
   }
 }
 
-async function main(): Promise<void> {
-  console.log(
-    `[${NODE_ID}] worker runner up (hub=${getHub()}, gitserver=${process.env.GITSERVER_URL ?? "UNSET"}, tags=${JSON.stringify(NODE_TAGS)})`,
-  );
-  setInterval(() => void heartbeat(), HEARTBEAT_MS);
-  await heartbeat();
-
-  for (;;) {
-    try {
-      if (!busy) {
-        const res = await hub(`/api/work?node=${encodeURIComponent(NODE_ID)}`);
-        if (res.status === 200) {
-          const job = (await res.json()) as JobSpec;
-          await executeJob(job).catch((e) => {
-            console.log(`[${NODE_ID}] job execution error: ${e.message}`);
-            void hub(`/api/jobs/${job.id}/status`, {
-              method: "POST",
-              body: JSON.stringify({ state: "failed", exit_code: 1, attempt: job.attempt }),
-            });
-          });
-          continue; // immediately look for more work
-        }
-      }
-    } catch (e) {
-      console.log(`[${NODE_ID}] poll error: ${(e as Error).message}`);
-    }
-    await new Promise((r) => setTimeout(r, POLL_MS));
-  }
-}
-
-// Auto-start guard: run the pull loop only when executed as the entrypoint
-// (npm start / container CMD), not when imported by tests.
-const isEntrypoint = (() => {
-  try {
-    return process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
-  } catch {
-    return false;
-  }
-})();
-if (isEntrypoint) {
-  main().catch((e) => {
-    console.error(`[${NODE_ID}] fatal:`, e);
-    process.exit(1);
-  });
-}
-
-/** R4: fetch + rebase the task branch onto the instructed main and force-push
- * (the hook consumes the hub-granted one-time authorization server-side).
- */
+/** R4/R5: fetch + rebase the task branch onto the instructed main and
+ * force-push (the hook consumes the hub-granted one-time authorization
+ * server-side; a conflict aborts and stays unacked for redelivery). */
 export function rebaseOntoMain(opts: {
   dir: string;
   repo: string;
@@ -450,13 +401,13 @@ export function rebaseOntoMain(opts: {
   targetMainSha: string;
 }): { ok: boolean; detail: string } {
   let r = sh("git", ["fetch", "--quiet", "origin", "main"], { cwd: opts.dir });
-  if (r.code !== 0) return { ok: false, detail: `fetch main failed: ${r.stderr.slice(0, 300)}` };
+  if (r.code !== 0) return { ok: false, detail: `fetch main failed: ${r.stderr.replace(/https:\/\/[^@/]+@/g, "https://***@").slice(0, 300)}` };
   // Rebase THIS branch's commits onto the instructed main (upstream=target);
   // `--onto target HEAD` replays nothing and would DROP the task's work.
   r = sh("git", ["rebase", opts.targetMainSha], { cwd: opts.dir });
   if (r.code !== 0) {
     sh("git", ["rebase", "--abort"], { cwd: opts.dir });
-    return { ok: false, detail: `rebase failed (conflict): ${r.stderr.slice(0, 300)}` };
+    return { ok: false, detail: `rebase failed (conflict): ${r.stderr.replace(/https:\/\/[^@/]+@/g, "https://***@").slice(0, 300)}` };
   }
   sh("git", ["remote", "set-url", "origin", originUrl(opts.repo)], { cwd: opts.dir });
   r = sh("git", ["push", "--quiet", "--force", "origin", `HEAD:${opts.branch}`], { cwd: opts.dir });
