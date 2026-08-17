@@ -61,7 +61,7 @@ Schema: [`progress.schema.json`](progress.schema.json)
 
 - Files listed in `outputs.evidence` are uploaded to the hub with the job
   result and become the inputs to **gate evaluation** (mechanical checks) and
-  **auditor review** (reasonableness). Evidence is reproducibility-bearing:
+  **secretary verification** (reasonableness). Evidence is reproducibility-bearing:
   seeds, config hashes, metric files.
 - Large artifacts belong on HuggingFace (recorded in the project's artifact
   registry by the secretary); evidence files are small by design.

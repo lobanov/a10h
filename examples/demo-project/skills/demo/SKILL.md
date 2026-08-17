@@ -43,6 +43,6 @@ For `baseline` the `baseline-gate` requires (mechanically, from `plan/graph.yaml
 
 ## Repair loop
 
-When the gate/auditor fails you, you receive the auditor's findings. Fix the specific deficiency, re-run what's needed, and re-submit on the same branch. Two failed repairs on the same deficiency → escalate:
+When the gate/secretary verification fails you, you receive the verification findings. Fix the specific deficiency, re-run what's needed, and re-submit on the same branch. Two failed repairs on the same deficiency → escalate:
 
 > ESCALATE: task unachievable as planned. Reason: <specific blocker>. Evidence: <links>.

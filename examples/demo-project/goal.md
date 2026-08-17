@@ -11,7 +11,7 @@ Determine whether a difficulty-ordered curriculum (easy→hard) improves converg
 
 1. Baseline and both curriculum variants trained under identical budgets with reproducible evidence (seeds, configs, metrics files).
 2. A comparative analysis artifact stating which curriculum (if any) converged faster, with effect sizes and uncertainty.
-3. Every activity's exit gate audited as *evidenced and reasonable* — not merely completed.
+3. Every activity's exit gate verified as *evidenced and reasonable* — not merely completed.
 
 ## Constraints
 

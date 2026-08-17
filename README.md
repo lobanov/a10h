@@ -1,6 +1,6 @@
 # Pi Autoresearch Lab
 
-A multi-agent research lab built on the [Pi coding agent](https://pi.dev): agents plan, run, audit, and reflect on experimental AI-architecture research across local GPUs (RTX 5090, DGX Spark) and remote LLM APIs — with a human operator supervising through a web dashboard.
+A multi-agent research lab built on the [Pi coding agent](https://pi.dev): agents plan, run, verify, and reflect on experimental AI-architecture research across local GPUs (RTX 5090, DGX Spark) and remote LLM APIs — with a human operator supervising through a web dashboard.
 
 > **Status:** alpha — M1–M6 implemented (job protocol, hub, runner, gates, agents, dashboard); deployed via docker-compose. See [PLAN.md](PLAN.md). The demo runs standalone (Parts A–D) and end-to-end through the deployed stack (Part E).
 
@@ -8,7 +8,7 @@ A multi-agent research lab built on the [Pi coding agent](https://pi.dev): agent
 
 - **Framework repo (this repo):** docker-compose stack (hub supervisor, Postgres, dashboard, LiteLLM) + workers (runners) that join by pulling work over HTTP+SSE. `git clone && docker-compose up` bootstraps the lab.
 - **Research project repos:** your actual research — goal, planning graph (activities + exit gates), experiment code, agent skills, artifacts (git + HuggingFace). See [examples/demo-project/](examples/demo-project/).
-- **Agent hierarchy:** director (plans, never executes), workers, auditor (exit-gate verification), secretary (work handoff, retention, indices/lineage), reflector (proposes plan/skill changes) — all pi agent sessions, governed by the approval + escalation flows in [DESIGN.md](DESIGN.md#5-agent-roster--governance).
+- **Agent hierarchy:** director (plans, never executes), workers, secretary (work handoff, formal gate verification, retention, indices/lineage), reflector (proposes plan/skill changes) — all pi agent sessions, governed by the approval + escalation flows in [DESIGN.md](DESIGN.md#5-agent-roster--governance).
 
 ## Documentation
 

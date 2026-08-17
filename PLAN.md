@@ -7,7 +7,7 @@ Tasklist derived from [DESIGN.md](DESIGN.md). Milestones are sequenced; tasks wi
 | Order | Stage | Scope | Ordered here because |
 |---|---|---|---|
 | done | M0–M6 | protocols, job plane, worker, governance, agents (director/auditor), dashboard ops + approvals | as-built |
-| 1–7 | R1 → R7 | gitserver+CA+tokens · task branches + pre-receive policy · checkout rework · SSE worker protocol · gates/auditor on committed state · secretary (work handoff) · demo seeding + validation rework | re-architects the core planes first so every later feature builds on final mechanics |
+| 1–7 | R1 → R7 | gitserver+CA+tokens · task branches + pre-receive policy · checkout rework · SSE worker protocol · gate verification on committed state · secretary (handoff + verification) · demo seeding + validation rework | re-architects the core planes first so every later feature builds on final mechanics |
 | 8 | M7 | approvals & gates UX polish (deduped against M6) | renders the final event model landed by R7 |
 | 9 | M8 | chat bridge (pi sessions, dashboard panel) | context injection reads the final state model |
 | 10 | M9 | reflector + skill-change pipeline (secretary scope lives in R6) | A/B runs go through the git plane |
@@ -89,7 +89,7 @@ Source: DESIGN.md v1.1 (§3.2.1 git plane, §3.3 state model, §3.4 skills, §4 
 - [ ] Bootstrap script: generate internal CA + gitserver server cert; create bare repos; issue worker git tokens **and an operator token** (main-write class); write hub-maintained policy map (job → allowed ref → token)
 - [ ] CA cert + token distribution to workers (compose secrets/env); `http.sslCAInfo` wired in worker git config
 - [ ] Hub HTTP API served under the same internal CA (worker→hub registration/status/acks ride TLS, not just git)
-- [ ] Hub-side git read access (supervisor reads bare repos directly for gates/auditor/secretary)
+- [ ] Hub-side git read access (supervisor reads bare repos directly for gates/secretary)
 
 **Acceptance:** from a worker container, `git clone https://<token>@gitserver/demo.git` succeeds with CA trust; unauthenticated clone fails; TLS errors absent; a worker container writes and reads back a file through the hf-mount bucket path with **no HF token present**; operator-token push to `main` succeeds while worker-token push to `main` is denied. Bootstrap is idempotent (re-run safe).
 
@@ -100,7 +100,7 @@ Source: DESIGN.md v1.1 (§3.2.1 git plane, §3.3 state model, §3.4 skills, §4 
 - [ ] Lease-expiry requeue appends on the same branch (no reset)
 - [ ] Serialized per-repo landing queue in scheduler (ff-merge when descendant; non-ff branches are **held** — rebase-instruction delivery arrives with R4; a stalled branch is skipped after a timeout rather than head-of-line blocking)
 
-**Acceptance (hub BDD):** push to wrong ref → rejected; push to task ref with wrong token → rejected; non-ff push without authorization → rejected; authorized rebase push → accepted once, replay rejected; after audit-complete, main ff-merges the branch; concurrent-landing fixture produces exactly one merge + one rebase instruction.
+**Acceptance (hub BDD):** push to wrong ref → rejected; push to task ref with wrong token → rejected; non-ff push without authorization → rejected; authorized rebase push → accepted once, replay rejected; after verified-complete, main ff-merges the branch; concurrent-landing fixture produces exactly one merge + one rebase instruction.
 
 ### R3 — In-container checkout rework
 - [ ] Worker clones from gitserver (full clone, task branch) using CA + token; checks out `{branch, base_sha}`
@@ -116,42 +116,43 @@ Source: DESIGN.md v1.1 (§3.2.1 git plane, §3.3 state model, §3.4 skills, §4 
 
 - [ ] Registration endpoint (well-known URL): worker announces → hub issues session id (scoped to container lifetime)
 - [ ] Per-session SSE endpoint with fresh buffer (no last-event-id); bounded reconnect buffering + idempotent acks; **no-rescue requeue** — mid-task worker death → lease expiry → fresh attempt on the same branch, no state recovery (workers are uniform until registered; only then are they addressable)
-- [ ] Instruction event types: `work_offer`, `auditor_feedback`, `retrospective_prompt`, `repair`, `rebase` (carries target main SHA + force-window ref), `cancel` (hub-initiated stop; complements lease-expiry requeue), extensible `custom`
+- [ ] Instruction event types: `work_offer`, `gate_feedback` (verification findings), `retrospective_prompt`, `repair`, `rebase` (carries target main SHA + force-window ref), `cancel` (hub-initiated stop; complements lease-expiry requeue), extensible `custom`
 - [ ] Register-then-offer replaces `GET /api/work` polling (remove or demote to bootstrap/fallback); worker→hub acks via API
 - [ ] Worker agentization (after transport): the worker's Pi session consumes instructions as turn inputs and decides; the M3 runner stays the executor — clone/checkout, workload spawn/SIGKILL, progress tailing, commit/push, status calls become agent-invoked tools
 - [ ] Until R6, the hub emits canned retrospective-prompt and post-merge **exit signals** (the secretary owns both from R6: workers stay operational until the merge lands or the attempt is closed)
 - [ ] Exit-after-task + `restart: always` wired in compose
 
-**Acceptance (worker BDD + integration):** session lifecycle scenario (register → receive instruction → ack → exit — with exit only on the post-merge signal, worker stays addressable through repair/rebase); worker death mid-task → task requeued from scratch with prior branch commits preserved; reconnect scenario redelivers buffered instructions; e2e shows auditor feedback and retrospective prompt consumed as Pi turns; no polling loop remains.
+**Acceptance (worker BDD + integration):** session lifecycle scenario (register → receive instruction → ack → exit — with exit only on the post-merge signal, worker stays addressable through repair/rebase); worker death mid-task → task requeued from scratch with prior branch commits preserved; reconnect scenario redelivers buffered instructions; e2e shows gate-verification feedback and retrospective prompt consumed as Pi turns; no polling loop remains.
 
-### R5 — Auditor + gates on committed state
+### R5 — Gate verification on committed state
 - [ ] Mechanical gate reads switch from Postgres blobs to bare-repo tree at task-branch tip (`git show`/archive read)
-- [ ] Auditor agent prompt/tooling reads the same committed state (incl. post-rebase re-audit round before merge)
+- [ ] Gate-verification agent work (the live v1 "auditor" implementation) reads the same committed state — formal submission criteria: criteria met, claims evidenced/reasonable (incl. post-rebase re-verification before merge); the duty folds into the secretary at R6
 - [ ] Remove evidence-upload API + `artifacts` content column → lineage index (path ↔ commit ↔ HF revision)
 - [ ] Remove `inputs_evidence` injection; dependents clone main (evidence via merged history)
 - [ ] Exit report carries the pushed commit SHA; gates evaluate exactly that SHA (never "the tip") and resolve criteria against declared `outputs.evidence` paths (no tree-wide search)
 - [ ] Churn-minimizing landing policy implemented (rebase only at landing turn; deferrable under high concurrency)
 - [ ] Revise protocols/README.md + job.schema.json to the v1.1 contract (`{branch, base_sha}`, no upload API, SSE delivery notes)
 
-**Acceptance (hub BDD + e2e):** gate criteria evaluated against committed files at the reported SHA; sabotage run fails on committed evidence (incl. a decoy-file attempt); audited-complete merge lands exactly the audited SHA; rebase path triggers re-audit before merge; Postgres contains zero research content (schema + row audit: no evidence files/blobs — scalar progress metrics are allowed telemetry).
+**Acceptance (hub BDD + e2e):** gate criteria evaluated against committed files at the reported SHA; sabotage run fails on committed evidence (incl. a decoy-file attempt); verified-complete merge lands exactly the verified SHA; rebase path triggers re-verification before merge; Postgres contains zero research content (schema + row audit: no evidence files/blobs — scalar progress metrics are allowed telemetry).
 
-### R6 — Secretary agent (work handoff)
-- [ ] Secretary agent (hub-side pi session, small/mid tier): operationalizes director intent into worker-facing specifics — artifact paths/refs, retrospective/summarize/archival follow-up requests — delivered via R4 instruction events
+### R6 — Secretary agent (work handoff, gate verification, retention)
+- [ ] Secretary agent (hub-side pi session, mid tier): operationalizes director intent into worker-facing specifics — artifact paths/refs, retrospective/summarize/archival follow-up requests — delivered via R4 instruction events
+- [ ] **Absorb gate verification** (retire the v1 "auditor" role): formal submission checks on committed state; adversarial research review stays **out of the framework** — worker/director commission it as ordinary tasks when wanted
 - [ ] Secretary owns the worker **exit signal**: exit-eligible once the attempt's merge lands (or the failed attempt is closed + summary note committed); until the signal, workers stay operational for repair/rebase
 - [ ] Retention execution: preserve branch + commit summary note to main for every attempt (success and failure); note commits go through the same serialized per-repo writer as merges
 - [ ] Lineage index maintenance (git ↔ HF pointers)
 - [ ] Role-shaping skill authored framework-side (`skills/secretary/`)
 
-**Acceptance (integration + e2e):** work_offer events carry secretary-authored operational details; every completed/failed attempt yields a note commit on main referencing the branch; the secretary never decides research direction (skill constraint test).
+**Acceptance (integration + e2e):** work_offer events carry secretary-authored operational details; the secretary performs gate verification (formal criteria only — no unsolicited adversarial review, by design); every completed/failed attempt yields a note commit on main referencing the branch; the secretary never decides research direction (skill constraint test).
 
 ### R7 — Demo seeding + validation rework
 - [ ] Bootstrap seeds `data/repos/demo.git` from `examples/demo-project`; framework repo no longer mounted to workers
 - [x] Demo project carries only the task-specific worker skill (`skills/demo/`); role-shaping skills (auditor/reflector/secretary) removed from the project repo
-- [ ] Author framework-side role-shaping skills (`skills/auditor/`, `skills/reflector/` — secretary skill in R6): hub-side personas never live in project repos
-- [ ] e2e rework — new git-plane checks: task branch pre-created; push denied to wrong refs; audited-complete merge lands on main; failed repair preserved + summary note committed; rebase path exercised (concurrent fixture)
+- [ ] Author framework-side role-shaping skills (`skills/secretary/` in R6, `skills/reflector/` in R7): hub-side personas never live in project repos
+- [ ] e2e rework — new git-plane checks: task branch pre-created; push denied to wrong refs; verified-complete merge lands on main; failed repair preserved + summary note committed; rebase path exercised (concurrent fixture)
 - [ ] Worker BDD: SSE-instruction + session-lifecycle scenarios; hub BDD: hook/merge scenarios (R2)
 - [ ] Skill (`autoresearch-e2e`) + incidents log extended for the new stack (gitserver, CA, sessions, exit-after-task)
-- [ ] Git-plane event taxonomy defined and emitted (branch-created, pushed, audited-complete/merged, note-committed); dashboard renders it
+- [ ] Git-plane event taxonomy defined and emitted (branch-created, pushed, verified-complete/merged, note-committed); dashboard renders it
 - [ ] Dashboard truth-aligned: branch/merge events in the activity feed; attempt notes visible
 
 **Acceptance:** full e2e green on the deployed R-stack (all prior 20 checks reworked + new git-plane checks); both BDD suites green; demo quick-start (Part E) updated and passing; skill updated.
@@ -162,11 +163,11 @@ Source: DESIGN.md v1.1 (§3.2.1 git plane, §3.3 state model, §3.4 skills, §4 
 *M6 already shipped the live approval inbox, gate results view, and agent log; M7 keeps only the polish deltas. Ordered after R7, which finalizes the event model (branch/merge/attempt-note events) these views render.*
 
 - [ ] Structured plan rendering inside approval cards (goal, activities, gates)
-- [ ] Substantial-change cards and gate-audit summaries in the inbox
-- [ ] Approve/reject/resolve **with comment**; evidence links + auditor reasoning surfaced from committed state (R5)
+- [ ] Substantial-change cards and gate-verification summaries in the inbox
+- [ ] Approve/reject/resolve **with comment**; evidence links + verification reasoning surfaced from committed state (R5)
 - [ ] Attempt-history browsing: preserved task branches + secretary summary notes (built on R7's feed events)
 
-**Validation:** full governance loop from the browser on the R-stack: approve plan → watch run incl. one audited merge and one failed-repair note → resolve a forced escalation with comment.
+**Validation:** full governance loop from the browser on the R-stack: approve plan → watch run incl. one verified merge and one failed-repair note → resolve a forced escalation with comment.
 
 ## M8 — Chat bridge
 *Ordered after the R-series: chat context injection reads the final state model (committed evidence, merged main). No hard dependency — can be pulled earlier in parallel if desired.*
@@ -179,7 +180,7 @@ Source: DESIGN.md v1.1 (§3.2.1 git plane, §3.3 state model, §3.4 skills, §4 
 ## M9 — Reflector & skill-change pipeline
 *Secretary scope lives in R6 (work handoff, retention, lineage index). M9 keeps reflection and skill evolution.*
 
-- [ ] Reflector: aggregates retrospectives + audit anomalies → proposals (plan/skill changes) → director approval flow
+- [ ] Reflector: aggregates retrospectives + verification anomalies → proposals (plan/skill changes) → director approval flow
 - [ ] Skill-change pipeline: proposal → optional **A/B on identical inputs** (branch-based: two task-style checkouts — worker worktrees were removed in R3) → commit on approval via the git plane
 
 **Validation:** inject a flawed skill demo → reflector proposes fix → branch-based A/B run compares outcomes → approved commit lands in git.

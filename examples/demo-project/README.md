@@ -12,7 +12,7 @@ By the end you will have exercised every protocol the framework defines:
 
 1. **Job protocol** — simulated jobs emit standard progress/ETA events and first-class evidence.
 2. **Planning graph** — a goal → DAG of activities → exit gates, reviewed before execution.
-3. **Governance** — human approves the plan; auditor verifies gates; a repair loop fires.
+3. **Governance** — human approves the plan; gates are verified (secretary; the v1 live stack runs this as the "auditor" agent); a repair loop fires.
 4. **Observability** — everything above is visible as it happens (standalone now; dashboard at M6).
 
 ---
@@ -32,7 +32,7 @@ examples/demo-project/
 ├── skills/              ← worker-task skills, versioned in this repo
 │   └── demo/SKILL.md    ← task-specific skill: how to run this demo's jobs
 │                            and produce gate-passing evidence
-│                         (role-shaping skills — auditor/reflector/secretary —
+│                         (role-shaping skills — secretary/reflector —
 │                          are framework-side; DESIGN.md §3.4)
 ├── config/
 │   └── project.yaml     ← per-project config: model tiers, role→model mapping
@@ -71,7 +71,7 @@ python jobs/analyze_results.py --runs runs/baseline runs/variant-a runs/variant-
 
 **Check yourself:**
 - `runs/baseline/progress.jsonl` contains JSON lines with `t`, `pct`, `eta_s`, `stage`, `metrics` — this is the progress contract from DESIGN.md §6.
-- `runs/baseline/metrics.json` exists — this is the **evidence** the auditor's gate check reads.
+- `runs/baseline/metrics.json` exists — this is the **evidence** the gate check reads.
 - Exit code is `0` and the final progress line has `"state": "succeeded"`.
 
 ### Part C — Exercise the failure path (10 min)
@@ -82,13 +82,13 @@ python jobs/simulate_training.py --variant baseline --steps 200 --out runs/bad -
 python jobs/analyze_results.py --runs runs/bad --out runs/bad-analysis || echo "analysis exited non-zero: expected"
 ```
 
-This is the artifact shape the **auditor** would reject at the `baseline-gate` (criteria: `final_loss < 0.5`), sending work back to the worker for **repair** — the governance loop from DESIGN.md §5.2.
+This is the artifact shape the **gate** would reject at `baseline-gate` (criteria: `final_loss < 0.5`), sending work back to the worker for **repair** — the governance loop from DESIGN.md §5.2.
 
 ### Part D — Trace the governance story (10 min)
 
-1. Open `plan/graph.yaml` → `baseline-gate` — see the exact criteria the auditor evaluates mechanically (job state, `final_loss < 0.5`, `seed` + `config_hash` present).
+1. Open `plan/graph.yaml` → `baseline-gate` — see the exact criteria evaluated mechanically (job state, `final_loss < 0.5`, `seed` + `config_hash` present).
 2. Open `skills/demo/SKILL.md` — the task-specific worker skill: evidence before claims, the exit bundle, the retrospective shape, repair/escalation behavior.
-3. Open `DESIGN.md` §5 — the role roster and governance flows (how retrospectives + audit anomalies become reflector proposals; how role behavior is shaped framework-side).
+3. Open `DESIGN.md` §5 — the role roster and governance flows (how retrospectives + verification anomalies become reflector proposals; how role behavior is shaped framework-side).
 
 ### Part E — Full stack (deployed framework, ~10 min)
 
@@ -97,13 +97,13 @@ The framework deploys via docker-compose (see repo `DESIGN.md` §4):
 ```bash
 # one-time: framework repo + model weights + env
 git clone <framework-repo> && cd <framework-repo>
-./scripts/fetch-models.sh                     # 15.8 GB local auditor model (optional)
+./scripts/fetch-models.sh                     # 15.8 GB local verification model (optional)
 cp .env.example .env                          # fill Z_AI_API_KEY (director agent)
 
 # deploy: hub + postgres + two workers (+ local vLLM when weights present)
 docker compose up -d postgres hub
 docker compose --profile worker up -d
-docker compose --profile local-llm up -d llamacpp  # optional local auditor model (GGUF via llama.cpp)
+docker compose --profile local-llm up -d llamacpp  # optional local verification model (GGUF via llama.cpp)
 
 open http://localhost:8080                     # dashboard: ops view + approvals
 ```
@@ -117,9 +117,9 @@ node scripts/e2e-demo.mjs http://localhost:8080
 
 You should see (in the dashboard and the e2e output): plan approval **blocking
 execution** until approved → jobs scheduled across two workers → live progress/ETA
-→ gates audited → the deliberate `repair-demo` gate fails, repairs, and
+→ gates verified → the deliberate `repair-demo` gate fails, repairs, and
 **escalates** with a director recommendation → operator resolves → plan done,
-with auditor notes attached to every gate result.
+with verification notes attached to every gate result.
 
 Without the optional vLLM profile, the same flow runs with agents disabled
 (set `AUDITOR_MODEL`/`DIRECTOR_MODEL` to a remote provider in `.env` to keep
@@ -130,7 +130,7 @@ agents on instead).
 ## Design notes (why this demo looks like this)
 
 - **Simulated, dependency-free jobs** prove the protocol is *stack-agnostic*: nothing here imports ML frameworks. Real projects replace job bodies; the contract stays.
-- **Evidence-first:** every job writes `metrics.json` before claiming success — auditor checks are mechanical, not vibes.
+- **Evidence-first:** every job writes `metrics.json` before claiming success — gate checks are mechanical, not vibes.
 - **The sabotage path is intentional:** a demo where nothing fails validates nothing about repair loops.
 - **Skills are content, not code:** the demo's task skill (`skills/demo/`) demonstrates that task know-how lives in versioned repo artifacts; role-shaping skills live framework-side (DESIGN.md §3.4) and evolve through the same governance.
 

@@ -1,8 +1,8 @@
 # Planning graph — demo project
 # Schema: DESIGN.md §5.3 + protocols (gate criteria are mechanical checks;
-# `type: agent` criteria defer to the auditor agent's reasonableness pass).
+# `type: agent` criteria defer to the secretary's formal verification pass).
 # Human approves: goal (goal.md), this first plan, and substantial changes.
-# Director may revise iff goal unchanged AND auditor satisfied.
+# Director may revise iff goal unchanged AND gate verification passing.
 
 goal_ref: goal.md
 version: 1

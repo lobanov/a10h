@@ -26,8 +26,7 @@ models:
   roles:
     director:  strong       # plans, assigns, approves within goal
     worker:    mid          # executes activities (tier may be raised per-task)
-    auditor:   strong       # gate verification must not be the weakest link
-    secretary: small       # work handoff, retention, lineage indexing
+    secretary: mid         # work handoff, formal gate verification, retention, lineage
     reflector: strongest    # cross-campaign synthesis
 
   escalation_second_opinion: strongest   # director's option (a) in DESIGN.md §5.2

@@ -6,7 +6,7 @@ Conforms to the framework job protocol (DESIGN.md §6):
     {t, pct, eta_s, stage, metrics}
   * terminal event carries {"state": "succeeded"|"failed"}
   * writes first-class evidence to <out>/metrics.json
-    (seed + config hash + final_loss) for auditor gate checks
+    (seed + config hash + final_loss) for gate verification checks
   * exit code 0 iff succeeded
 
 Stdlib-only: proves the protocol is stack-agnostic. A real project would

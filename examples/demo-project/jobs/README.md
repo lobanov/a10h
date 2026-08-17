@@ -11,7 +11,7 @@ Both jobs (`simulate_training.py`, `analyze_results.py`) are **simulated, stdlib
    - `pct` monotonic 0–100; `eta_s` best-effort; `stage` human-readable; `metrics` free-form key/values.
    - Terminal line adds `"state": "succeeded"` or `"failed"`.
 
-2. **First-class evidence** — `metrics.json` with reproducibility fields (`seed`, `config_hash`) plus the quantities a gate will check (`final_loss`). The auditor reads this file; claims without evidence fail gates.
+2. **First-class evidence** — `metrics.json` with reproducibility fields (`seed`, `config_hash`) plus the quantities a gate will check (`final_loss`). Gate verification reads this file; claims without evidence fail gates.
 
 3. **Exit code semantics** — 0 iff `state == succeeded`.
 
