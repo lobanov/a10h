@@ -85,16 +85,17 @@ Source: DESIGN.md v1.1 (§3.2.1 git plane, §3.3 state model, §3.4 skills, §4 
 
 ### R1 — Gitserver + internal CA + worker tokens
 - [ ] `gitserver` service in hub compose: nginx + git-http-backend (fcgiwrap), bare repos on `data/repos/*.git`, smart HTTP over TLS
-- [ ] Bootstrap script: generate internal CA + gitserver server cert; create bare repos; issue worker git tokens; write hub-maintained policy map (job → allowed ref → token)
+- [ ] `hf-mount` sidecar in hub compose (NFS backend): mounts the project HF Bucket read-write; the single `HF_TOKEN` stays hub-side — workers get filesystem access, no tokens
+- [ ] Bootstrap script: generate internal CA + gitserver server cert; create bare repos; issue worker git tokens **and an operator token** (main-write class); write hub-maintained policy map (job → allowed ref → token)
 - [ ] CA cert + token distribution to workers (compose secrets/env); `http.sslCAInfo` wired in worker git config
 - [ ] Hub HTTP API served under the same internal CA (worker→hub registration/status/acks ride TLS, not just git)
 - [ ] Hub-side git read access (supervisor reads bare repos directly for gates/auditor/secretary)
 
-**Acceptance:** from a worker container, `git clone https://<token>@gitserver/demo.git` succeeds with CA trust; unauthenticated clone fails; TLS errors absent. Bootstrap is idempotent (re-run safe).
+**Acceptance:** from a worker container, `git clone https://<token>@gitserver/demo.git` succeeds with CA trust; unauthenticated clone fails; TLS errors absent; a worker container writes and reads back a file through the hf-mount bucket path with **no HF token present**; operator-token push to `main` succeeds while worker-token push to `main` is denied. Bootstrap is idempotent (re-run safe).
 
 ### R2 — Task branches + pre-receive policy
 - [ ] Scheduler creates `refs/tasks/<activity>` at current main tip on promotion; job spec carries `{branch, base_sha}`
-- [ ] Hub-generated pre-receive hook enforces: ref-match + token-match + fast-forward; denies pushes to any other ref incl. main; the hook is thin — it calls a supervisor API that validates pushes and **atomically consumes** one-time authorizations (re-grant on failed push); ref deletions and tag pushes denied outright
+- [ ] Hub-generated pre-receive hook enforces: ref-match + token-match + fast-forward; denies pushes to any other ref incl. main (one exception: the **operator token** may push `main` — human/director write path, ff-only); the hook is thin — it calls a supervisor API that validates pushes and **atomically consumes** one-time authorizations (re-grant on failed push); ref deletions and tag pushes denied outright
 - [ ] One-time rebase/force authorization records (granted by hub, consumed by hook)
 - [ ] Lease-expiry requeue appends on the same branch (no reset)
 - [ ] Serialized per-repo landing queue in scheduler (ff-merge when descendant; non-ff branches are **held** — rebase-instruction delivery arrives with R4; a stalled branch is skipped after a timeout rather than head-of-line blocking)
@@ -105,6 +106,7 @@ Source: DESIGN.md v1.1 (§3.2.1 git plane, §3.3 state model, §3.4 skills, §4 
 - [ ] Worker clones from gitserver (full clone, task branch) using CA + token; checks out `{branch, base_sha}`
 - [ ] Delete worktree code path and `CHECKOUT_STRATEGY` env; remove `/repo` bind mount from worker services
 - [ ] Checkout deleted on task end (exit-after-task makes the container itself ephemeral)
+- [ ] Worker work env exposes the hf-mount bucket path (per-task subfolder): workloads write artifacts there, commit git-side pointers on the task branch, read back through the mount before reporting done
 
 **Acceptance (worker BDD):** checkout scenario reworked — clone source is the gitserver URL fixture (fake hub/git server), correct branch checked out, workspace contains the branch content; no worktree/`/repo` references remain in worker code or compose.
 
@@ -113,14 +115,14 @@ Source: DESIGN.md v1.1 (§3.2.1 git plane, §3.3 state model, §3.4 skills, §4 
 *Transport first, then agentization — staged inside this milestone:*
 
 - [ ] Registration endpoint (well-known URL): worker announces → hub issues session id (scoped to container lifetime)
-- [ ] Per-session SSE endpoint with fresh buffer (no last-event-id); instruction buffering while no live session (restart window); addressing/ack semantics per §10 decision (at-least-once + idempotent acks, bounded buffers)
+- [ ] Per-session SSE endpoint with fresh buffer (no last-event-id); bounded reconnect buffering + idempotent acks; **no-rescue requeue** — mid-task worker death → lease expiry → fresh attempt on the same branch, no state recovery (workers are uniform until registered; only then are they addressable)
 - [ ] Instruction event types: `work_offer`, `auditor_feedback`, `retrospective_prompt`, `repair`, `rebase` (carries target main SHA + force-window ref), `cancel` (hub-initiated stop; complements lease-expiry requeue), extensible `custom`
 - [ ] Register-then-offer replaces `GET /api/work` polling (remove or demote to bootstrap/fallback); worker→hub acks via API
 - [ ] Worker agentization (after transport): the worker's Pi session consumes instructions as turn inputs and decides; the M3 runner stays the executor — clone/checkout, workload spawn/SIGKILL, progress tailing, commit/push, status calls become agent-invoked tools
-- [ ] Until R6, the hub emits a canned retrospective prompt (the secretary authors richer ones from R6)
+- [ ] Until R6, the hub emits canned retrospective-prompt and post-merge **exit signals** (the secretary owns both from R6: workers stay operational until the merge lands or the attempt is closed)
 - [ ] Exit-after-task + `restart: always` wired in compose
 
-**Acceptance (worker BDD + integration):** session lifecycle scenario (register → receive instruction → ack → exit); reconnect-after-restart scenario delivers buffered instruction; e2e shows auditor feedback and retrospective prompt consumed as Pi turns; no polling loop remains.
+**Acceptance (worker BDD + integration):** session lifecycle scenario (register → receive instruction → ack → exit — with exit only on the post-merge signal, worker stays addressable through repair/rebase); worker death mid-task → task requeued from scratch with prior branch commits preserved; reconnect scenario redelivers buffered instructions; e2e shows auditor feedback and retrospective prompt consumed as Pi turns; no polling loop remains.
 
 ### R5 — Auditor + gates on committed state
 - [ ] Mechanical gate reads switch from Postgres blobs to bare-repo tree at task-branch tip (`git show`/archive read)
@@ -135,6 +137,7 @@ Source: DESIGN.md v1.1 (§3.2.1 git plane, §3.3 state model, §3.4 skills, §4 
 
 ### R6 — Secretary agent (work handoff)
 - [ ] Secretary agent (hub-side pi session, small/mid tier): operationalizes director intent into worker-facing specifics — artifact paths/refs, retrospective/summarize/archival follow-up requests — delivered via R4 instruction events
+- [ ] Secretary owns the worker **exit signal**: exit-eligible once the attempt's merge lands (or the failed attempt is closed + summary note committed); until the signal, workers stay operational for repair/rebase
 - [ ] Retention execution: preserve branch + commit summary note to main for every attempt (success and failure); note commits go through the same serialized per-repo writer as merges
 - [ ] Lineage index maintenance (git ↔ HF pointers)
 - [ ] Role-shaping skill authored framework-side (`skills/secretary/`)
