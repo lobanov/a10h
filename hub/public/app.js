@@ -97,7 +97,7 @@ function render() {
           <b>${esc(g.activity)}</b> ${statusChip(g.verdict === "pass" ? "passed" : "failed")}
           <span style="color:var(--dim)"> · ${esc(g.reason ?? "")}</span>
           <div class="checks">${checks.map((c) => `${c.ok ? "✓" : "✗"} ${esc(c.id)}: ${esc(c.detail)}`).join("\n")}</div>
-          ${audit ? `<div class="audit"><b>auditor:</b> ${esc(audit.verdict ?? "")} — ${esc(audit.note ?? "")}</div>` : ""}
+          ${audit ? `<div class="audit"><b>secretary:</b> ${esc(audit.verdict ?? "")} — ${esc(audit.note ?? "")}</div>` : ""}
         </div>`;
       }).join("")
     : `<div class="chip dim">no gate results yet</div>`;
@@ -140,7 +140,9 @@ function connectSSE() {
     document.getElementById("conn").textContent = "live";
     document.getElementById("conn").className = "chip ok";
   });
-  const interesting = ["job_event", "job_status", "activity", "plan", "approval", "gate", "node", "agent", "job_result"];
+  // R7: git-plane taxonomy in the feed (branch-created, pushed, verified-
+  // complete/merged, note-committed, rebase-required/hub-rebase, sync).
+  const interesting = ["job_event", "job_status", "activity", "plan", "approval", "gate", "node", "agent", "job_result", "git", "instruction", "worker_session"];
   for (const name of interesting) {
     es.addEventListener(name, (e) => {
       logEvent(name, e.data);

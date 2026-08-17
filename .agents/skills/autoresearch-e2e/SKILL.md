@@ -12,6 +12,17 @@ Paths below are relative to the repo root (`~/autoresearch`). "Green" means
 approval blocking, 2-worker scheduling, gate pass/fail, repair→escalation
 with director note, auditor audits, schema-valid artifacts, plan done).
 
+## 0. Git plane first (R-series stack)
+
+```bash
+./scripts/bootstrap-git.sh        # CA + certs + worker tokens + demo.git seed (idempotent)
+```
+
+The hub API is TLS (internal CA): every host-side client needs
+`NODE_EXTRA_CA_CERTS=data/git/ca/ca.crt` and curl needs `--cacert
+data/git/ca/ca.crt`. Workers get the CA + their own token via read-only
+file mounts (never the whole data/git tree).
+
 ## 1. Configure (once per machine)
 
 ```bash

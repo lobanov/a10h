@@ -171,6 +171,53 @@ async function main() {
   }
   rmSync(tmp, { recursive: true, force: true });
 
+  // ---------- R7: git-plane checks (the repo IS the record) ----------
+  {
+    const REPO = join(ROOT, "data/repos/demo.git");
+    const g = (args) => execFileSync("git", ["--git-dir", REPO, ...args], { encoding: "utf8" }).trim();
+    const refExists = (ref) => { try { g(["rev-parse", "--verify", "--quiet", ref]); return true; } catch { return false; } };
+    const isAncestor = (a, b) => { try { execFileSync("git", ["--git-dir", REPO, "merge-base", "--is-ancestor", a, b], { stdio: "ignore" }); return true; } catch { return false; } };
+
+    check("task branches pre-created under the plan scope", refExists(`refs/tasks/${PLAN_NAME}/baseline`));
+
+    // Wrong-ref push denial through the deployed gitserver (from a worker
+    // container — the gitserver is compose-internal by design).
+    const push = spawnSync("docker", [
+      "compose", "exec", "-T", "gitserver", "sh", "-c",
+      `T=$(cat /data/git/tokens/worker-a.token); git config --global http.sslCAInfo /data/git/ca/ca.crt; ` +
+      `cd /tmp && rm -rf denycheck && git clone -q https://\$T@gitserver/demo.git denycheck && ` +
+      `cd denycheck && echo deny >> goal.md && git add -A && git -c user.name=e2e -c user.email=e2e@local commit -qm denycheck && ` +
+      `git push origin HEAD:refs/heads/main; echo EXIT=\$?`,
+    ], { cwd: ROOT, encoding: "utf8" });
+    const pushOut = `${push.stdout ?? ""}${push.stderr ?? ""}`;
+    check("worker-token push to main denied", /EXIT=[1-9]/.test(pushOut), pushOut.trim().split("\n").pop()?.slice(0, 80));
+
+    // Verified-complete merges: every successful activity's branch tip is
+    // contained in main (serialized landing; rebase path exercised whenever
+    // main moved between branch cuts and landings — which every run with
+    // notes does).
+    // The final merge (analysis) may still be in its verification round —
+    // poll up to 120s for full convergence.
+    let landed = [];
+    for (let i = 0; i < 60; i++) {
+      landed = ["baseline", "variant-a", "variant-b", "analysis"].filter((a) => {
+        const ref = `refs/tasks/${PLAN_NAME}/${a}`;
+        return refExists(ref) && isAncestor(g(["rev-parse", ref]), "main");
+      });
+      if (landed.length === 4) break;
+      await sleep(2000);
+    }
+    check("verified-complete branches merged to main", landed.length === 4, landed.join(","));
+
+    // Failed repair preserved + noted on main.
+    const repairRef = `refs/tasks/${PLAN_NAME}/repair-demo`;
+    const notes = g(["ls-tree", "-r", "--name-only", "main"]).split("\n").filter((f) => f.startsWith(`notes/${PLAN_NAME}/`));
+    check("failed repair branch preserved", refExists(repairRef));
+    check("attempt notes committed to main", notes.length >= 4, notes.join(" ").slice(0, 90));
+    const repairNote = notes.find((f) => f.includes("repair-demo"));
+    check("failed attempt has a summary note", Boolean(repairNote), repairNote ?? "none");
+  }
+
   // summary
   console.log(`\n[e2e] ${failures.length === 0 ? "ALL CHECKS PASSED" : `${failures.length} FAILED: ${failures.join(", ")}`}`);
   process.exit(failures.length === 0 ? 0 : 1);

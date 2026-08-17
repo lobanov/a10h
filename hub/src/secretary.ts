@@ -152,6 +152,7 @@ export async function commitAttemptNote(input: {
       const u = sh("git", ["--git-dir", gitDir, "update-ref", "refs/heads/main", sha]);
       if (u.code !== 0) { console.error("[secretary] note update-ref failed:", u.stderr.slice(0, 200)); return { committed: false, note_path: notePath }; }
       await logSecretary("note_committed", { ...input, note_path: notePath, main: sha });
+      bus.publish("git", { kind: "note_committed", repo: input.repo, note_path: notePath, main: sha, activity: input.activity, attempt: input.attempt });
       return { committed: true, note_path: notePath, main: sha };
     } finally {
       rmSync(wt, { recursive: true, force: true });

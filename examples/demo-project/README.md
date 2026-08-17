@@ -100,30 +100,40 @@ git clone <framework-repo> && cd <framework-repo>
 ./scripts/fetch-models.sh                     # 15.8 GB local verification model (optional)
 cp .env.example .env                          # fill Z_AI_API_KEY (director agent)
 
-# deploy: hub + postgres + two workers (+ local vLLM when weights present)
-docker compose up -d postgres hub
+# git plane (R1): internal CA, worker tokens, demo.git seeded from this
+# project — idempotent, run it before the stack
+./scripts/bootstrap-git.sh
+
+# deploy: hub + gitserver + postgres + two workers (+ local LLM when present)
+docker compose up -d postgres hub gitserver
 docker compose --profile worker up -d
 docker compose --profile local-llm up -d llamacpp  # optional local verification model (GGUF via llama.cpp)
 
-open http://localhost:8080                     # dashboard: ops view + approvals
+open https://localhost:8080                    # dashboard over the internal CA
+# browser note: import data/git/ca/ca.crt as a trusted root (or click through)
 ```
 
-Then submit the demo plan and drive it end-to-end (submission, approval, both
-workers pulling work, gates, repair, escalation, agent notes):
+Then submit the demo plan and drive it end-to-end (submission, approval,
+register-then-offer scheduling, task branches, committed evidence, verified
+merges, repair, escalation, agent notes, attempt notes on main):
 
 ```bash
-node scripts/e2e-demo.mjs http://localhost:8080
+NODE_EXTRA_CA_CERTS=data/git/ca/ca.crt node scripts/e2e-demo.mjs https://localhost:8080
 ```
 
 You should see (in the dashboard and the e2e output): plan approval **blocking
-execution** until approved → jobs scheduled across two workers → live progress/ETA
-→ gates verified → the deliberate `repair-demo` gate fails, repairs, and
-**escalates** with a director recommendation → operator resolves → plan done,
-with verification notes attached to every gate result.
+execution** until approved → jobs offered to registered workers over SSE →
+workers clone their task branches from the gitserver → live progress/ETA →
+gates verified against the **committed evidence** at the reported SHA →
+verified-complete branches **merged to main** (the repo is the record) →
+the deliberate `repair-demo` gate fails, repairs, and **escalates** with a
+director recommendation → operator resolves → plan done, with secretary
+verification notes on every gate result and attempt notes under `notes/` on
+main. Afterwards: `git --git-dir=data/repos/demo.git log --oneline main`.
 
-Without the optional vLLM profile, the same flow runs with agents disabled
-(set `AUDITOR_MODEL`/`DIRECTOR_MODEL` to a remote provider in `.env` to keep
-agents on instead).
+Without the optional local LLM, the same flow runs with verification falling
+back to the mechanical verdict (set `SECRETARY_MODEL`/`DIRECTOR_MODEL` to a
+remote provider in `.env` to keep agents on instead).
 
 ---
 

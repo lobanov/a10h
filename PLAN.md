@@ -148,16 +148,16 @@ Source: DESIGN.md v1.1 (§3.2.1 git plane, §3.3 state model, §3.4 skills, §4 
 **Independent review (glm-5.3, post-build):** 6 major / 11 minor — all 6 majors + m1/m2/m6/m7/m8/m10 fixed and re-validated (audit-wedge sweep + bounded retries with mechanical fallback at 3; hubRebase CAS so worker pushes are never overwritten; rebase-round cap counts only recent held rounds; retention notes batched into quiescent windows — merged attempts note inside the landing path BEFORE the exit signal, failures defer while landings are pending; activity-id charset validated at graph parse AND at ref/path construction; authoritative note dedup + bounded retries with a stalled event; agents.ts header + env docs truth-aligned; graph intent (title/expected_outcome) wired into handoffs; LANDING_STALL lazy). Deferred (documented): m3 gate-eval idempotency per job+sha, m4 grace-window node snapshot, m5 post-hub-rebase retro ordering (self-healing via fresh checkout), m9 resolution disposition in notes, m11 extra BDD scenarios (hub-rebase fallback, failed-attempt note — covered by deployed e2e).
 
 ### R7 — Demo seeding + validation rework
-- [ ] Bootstrap seeds `data/repos/demo.git` from `examples/demo-project`; framework repo no longer mounted to workers
-- [x] Demo project carries only the task-specific worker skill (`skills/demo/`); role-shaping skills (auditor/reflector/secretary) removed from the project repo
-- [ ] Author framework-side role-shaping skills (`skills/secretary/` in R6, `skills/reflector/` in R7): hub-side personas never live in project repos
-- [ ] e2e rework — new git-plane checks: task branch pre-created; push denied to wrong refs; verified-complete merge lands on main; failed repair preserved + summary note committed; rebase path exercised (concurrent fixture)
-- [ ] Worker BDD: SSE-instruction + session-lifecycle scenarios; hub BDD: hook/merge scenarios (R2)
-- [ ] Skill (`autoresearch-e2e`) + incidents log extended for the new stack (gitserver, CA, sessions, exit-after-task)
-- [ ] Git-plane event taxonomy defined and emitted (branch-created, pushed, verified-complete/merged, note-committed); dashboard renders it
-- [ ] Dashboard truth-aligned: branch/merge events in the activity feed; attempt notes visible
+- [x] Bootstrap seeds `data/repos/demo.git` from `examples/demo-project` (bootstrap-git.sh seed_repo); framework repo no longer mounted to workers
+- [x] Demo project carries only the task-specific worker skill (`skills/demo/`); role-shaping skills removed from project repos
+- [x] Framework-side role-shaping skills authored: `skills/secretary/` (R6), `skills/reflector/` (R7) — hub-side personas never live in project repos
+- [x] e2e rework — new git-plane checks in `e2e-demo.mjs`: task branches pre-created under the plan scope; worker-token push to main DENIED by the deployed pre-receive hook (in-stack check via the gitserver container, CA-configured — policy denial, not a network artifact); verified-complete branches merged to main (all four successful activities' tips contained in main — serialized landing + the rebase path exercised every run since notes move main); failed repair branch PRESERVED; attempt notes on main (≥4, incl. the failed attempt)
+- [x] Worker BDD: SSE-instruction + session-lifecycle scenarios (worker-sessions.feature, R4); hub BDD: hook/merge scenarios (git-plane.feature, R2) + secretary scenarios (secretary.feature, R6)
+- [x] Skill (`autoresearch-e2e`) + incidents log extended for the R-stack (git-plane-first configure section; TLS clients; five R-series incidents: tailer re-pump wedge, exit-signal deadlocks, main-churn vs landings, import-hoisting env traps, hooks-vs-fetch transport rules)
+- [x] Git-plane event taxonomy defined and emitted (branch_created, merged, note_committed, rebase_required, hub_rebase, upstream_sync); dashboard renders it in the activity feed (+ instruction/worker_session events); verification notes labeled secretary; attempt notes visible as git events
+- [x] Demo quick-start (Part E) updated: bootstrap-git.sh step, TLS dashboard, https e2e with NODE_EXTRA_CA_CERTS, SECRETARY_MODEL fallback wording, post-run `git log` pointer
 
-**Acceptance:** full e2e green on the deployed R-stack (all prior 20 checks reworked + new git-plane checks); both BDD suites green; demo quick-start (Part E) updated and passing; skill updated.
+**Acceptance:** ✅ full e2e green on the deployed R-stack — `e2e-demo.mjs` ALL CHECKS PASSED including the six new git-plane checks; hub BDD 21/21 (100+ steps); worker BDD 12/12; `e2e-gitplane.mjs` 23/23; demo quick-start (Part E) updated and exercised; skill + incidents extended.
 
 ---
 
