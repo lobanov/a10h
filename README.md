@@ -8,7 +8,7 @@ A multi-agent research lab built on the [Pi coding agent](https://pi.dev): agent
 
 - **Framework repo (this repo):** docker-compose stack (hub supervisor, Postgres, dashboard, LiteLLM) + workers (runners) that join by pulling work over HTTP+SSE. `git clone && docker-compose up` bootstraps the lab.
 - **Research project repos:** your actual research — goal, planning graph (activities + exit gates), experiment code, agent skills, artifacts (git + HuggingFace). See [examples/demo-project/](examples/demo-project/).
-- **Agent hierarchy:** director (plans, never executes), workers, auditor (exit-gate verification), librarian (indices/taxonomies), reflector (proposes plan/skill changes) — all pi agent sessions, governed by the approval + escalation flows in [DESIGN.md](DESIGN.md#5-agent-roster--governance).
+- **Agent hierarchy:** director (plans, never executes), workers, auditor (exit-gate verification), secretary (work handoff, retention, indices/lineage), reflector (proposes plan/skill changes) — all pi agent sessions, governed by the approval + escalation flows in [DESIGN.md](DESIGN.md#5-agent-roster--governance).
 
 ## Documentation
 

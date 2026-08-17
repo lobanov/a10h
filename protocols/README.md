@@ -64,7 +64,7 @@ Schema: [`progress.schema.json`](progress.schema.json)
   **auditor review** (reasonableness). Evidence is reproducibility-bearing:
   seeds, config hashes, metric files.
 - Large artifacts belong on HuggingFace (recorded in the project's artifact
-  registry by the librarian); evidence files are small by design.
+  registry by the secretary); evidence files are small by design.
 
 ## 4. Lease & cancellation semantics
 

@@ -7,10 +7,10 @@ Tasklist derived from [DESIGN.md](DESIGN.md). Milestones are sequenced; tasks wi
 | Order | Stage | Scope | Ordered here because |
 |---|---|---|---|
 | done | M0–M6 | protocols, job plane, worker, governance, agents (director/auditor), dashboard ops + approvals | as-built |
-| 1–7 | R1 → R7 | gitserver+CA+tokens · task branches + pre-receive policy · checkout rework · SSE worker protocol · gates/auditor on committed state · librarian-as-secretary · demo seeding + validation rework | re-architects the core planes first so every later feature builds on final mechanics |
+| 1–7 | R1 → R7 | gitserver+CA+tokens · task branches + pre-receive policy · checkout rework · SSE worker protocol · gates/auditor on committed state · secretary (work handoff) · demo seeding + validation rework | re-architects the core planes first so every later feature builds on final mechanics |
 | 8 | M7 | approvals & gates UX polish (deduped against M6) | renders the final event model landed by R7 |
 | 9 | M8 | chat bridge (pi sessions, dashboard panel) | context injection reads the final state model |
-| 10 | M9 | reflector + skill-change pipeline (librarian scope moved to R6) | A/B runs go through the git plane |
+| 10 | M9 | reflector + skill-change pipeline (secretary scope lives in R6) | A/B runs go through the git plane |
 | 11 | M10 | packaging, demo polish, public release | needs everything above stable |
 | 12 | P4 | real compute (first GPU campaign, Spark joins) | post-release by definition |
 
@@ -87,7 +87,7 @@ Source: DESIGN.md v1.1 (§3.2.1 git plane, §3.3 state model, §3.4 skills, §4 
 - [ ] `gitserver` service in hub compose: nginx + git-http-backend (fcgiwrap), bare repos on `data/repos/*.git`, smart HTTP over TLS
 - [ ] Bootstrap script: generate internal CA + gitserver server cert; create bare repos; issue worker git tokens; write hub-maintained policy map (job → allowed ref → token)
 - [ ] CA cert + token distribution to workers (compose secrets/env); `http.sslCAInfo` wired in worker git config
-- [ ] Hub-side git read access (supervisor reads bare repos directly for gates/auditor/librarian)
+- [ ] Hub-side git read access (supervisor reads bare repos directly for gates/auditor/secretary)
 
 **Acceptance:** from a worker container, `git clone https://<token>@gitserver/demo.git` succeeds with CA trust; unauthenticated clone fails; TLS errors absent. Bootstrap is idempotent (re-run safe).
 
@@ -125,17 +125,17 @@ Source: DESIGN.md v1.1 (§3.2.1 git plane, §3.3 state model, §3.4 skills, §4 
 
 **Acceptance (hub BDD + e2e):** gate criteria evaluated against committed files; sabotage run fails on committed evidence; audited-complete merge lands exactly the audited SHA; rebase path triggers re-audit before merge; Postgres contains zero research content (schema + row audit).
 
-### R6 — Librarian as secretary (agent)
-- [ ] Librarian agent (hub-side pi session, small/mid tier): operationalizes director intent into worker-facing specifics — artifact paths/refs, retrospective/summarize/archival follow-up requests — delivered via R4 instruction events
+### R6 — Secretary agent (work handoff)
+- [ ] Secretary agent (hub-side pi session, small/mid tier): operationalizes director intent into worker-facing specifics — artifact paths/refs, retrospective/summarize/archival follow-up requests — delivered via R4 instruction events
 - [ ] Retention execution: preserve branch + commit summary note to main for every attempt (success and failure)
 - [ ] Lineage index maintenance (git ↔ HF pointers)
-- [ ] Role-shaping skill authored framework-side (`skills/librarian/`)
+- [ ] Role-shaping skill authored framework-side (`skills/secretary/`)
 
-**Acceptance (integration + e2e):** work_offer events carry librarian-authored operational details; every completed/failed attempt yields a note commit on main referencing the branch; librarian never decides research direction (skill constraint test).
+**Acceptance (integration + e2e):** work_offer events carry secretary-authored operational details; every completed/failed attempt yields a note commit on main referencing the branch; the secretary never decides research direction (skill constraint test).
 
 ### R7 — Demo seeding + validation rework
 - [ ] Bootstrap seeds `data/repos/demo.git` from `examples/demo-project`; framework repo no longer mounted to workers
-- [ ] Migrate role-shaping skills (auditor/reflector/librarian) from `examples/demo-project/skills/` to framework `skills/`; demo project keeps only worker-task-specific skills
+- [ ] Migrate role-shaping skills (auditor/reflector/secretary) from `examples/demo-project/skills/` to framework `skills/`; demo project keeps only worker-task-specific skills
 - [ ] e2e rework — new git-plane checks: task branch pre-created; push denied to wrong refs; audited-complete merge lands on main; failed repair preserved + summary note committed; rebase path exercised (concurrent fixture)
 - [ ] Worker BDD: SSE-instruction + session-lifecycle scenarios; hub BDD: hook/merge scenarios (R2)
 - [ ] Skill (`autoresearch-e2e`) + incidents log extended for the new stack (gitserver, CA, sessions, exit-after-task)
@@ -151,7 +151,7 @@ Source: DESIGN.md v1.1 (§3.2.1 git plane, §3.3 state model, §3.4 skills, §4 
 - [ ] Structured plan rendering inside approval cards (goal, activities, gates)
 - [ ] Substantial-change cards and gate-audit summaries in the inbox
 - [ ] Approve/reject/resolve **with comment**; evidence links + auditor reasoning surfaced from committed state (R5)
-- [ ] Attempt-history browsing: preserved task branches + librarian summary notes (built on R7's feed events)
+- [ ] Attempt-history browsing: preserved task branches + secretary summary notes (built on R7's feed events)
 
 **Validation:** full governance loop from the browser on the R-stack: approve plan → watch run incl. one audited merge and one failed-repair note → resolve a forced escalation with comment.
 
@@ -164,7 +164,7 @@ Source: DESIGN.md v1.1 (§3.2.1 git plane, §3.3 state model, §3.4 skills, §4 
 **Validation:** operator asks "why did gate 3 fail?" mid-run; the addressed role answers with correct job context.
 
 ## M9 — Reflector & skill-change pipeline
-*Librarian scope moved to R6 (secretary/work-handoff, retention, lineage index). M9 keeps reflection and skill evolution.*
+*Secretary scope lives in R6 (work handoff, retention, lineage index). M9 keeps reflection and skill evolution.*
 
 - [ ] Reflector: aggregates retrospectives + audit anomalies → proposals (plan/skill changes) → director approval flow
 - [ ] Skill-change pipeline: proposal → optional **A/B on identical inputs** (branch-based: two task-style checkouts — worker worktrees were removed in R3) → commit on approval via the git plane

@@ -33,10 +33,10 @@ examples/demo-project/
 │   ├── worker-researcher/SKILL.md
 │   ├── auditor/SKILL.md
 │   ├── reflector/SKILL.md
-│   └── librarian/SKILL.md
+│   └── secretary/SKILL.md
 ├── config/
 │   └── project.yaml     ← per-project config: model tiers, role→model mapping
-└── runs/                ← worktrees + outputs (created at runtime; gitignored)
+└── runs/                ← outputs (created at runtime; gitignored)
 ```
 
 ---
