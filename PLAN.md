@@ -99,11 +99,84 @@ Tasklist derived from [DESIGN.md](DESIGN.md). Milestones are sequenced; tasks wi
 
 ---
 
+## R-series — Git plane + worker-agent refinement (designed; supersedes parts of M2/M3/M5 mechanics)
+
+Source: DESIGN.md v1.1 (§3.2.1 git plane, §3.3 state model, §3.4 skills, §4 deployment, §5.1 roster, §7.1 SSE protocol). Each milestone has hard acceptance criteria; all existing green suites must stay green unless explicitly reworked in R7.
+
+### R1 — Gitserver + internal CA + worker tokens
+- [ ] `gitserver` service in hub compose: nginx + git-http-backend (fcgiwrap), bare repos on `data/repos/*.git`, smart HTTP over TLS
+- [ ] Bootstrap script: generate internal CA + gitserver server cert; create bare repos; issue worker git tokens; write hub-maintained policy map (job → allowed ref → token)
+- [ ] CA cert + token distribution to workers (compose secrets/env); `http.sslCAInfo` wired in worker git config
+- [ ] Hub-side git read access (supervisor reads bare repos directly for gates/auditor/librarian)
+
+**Acceptance:** from a worker container, `git clone https://<token>@gitserver/demo.git` succeeds with CA trust; unauthenticated clone fails; TLS errors absent. Bootstrap is idempotent (re-run safe).
+
+### R2 — Task branches + pre-receive policy
+- [ ] Scheduler creates `refs/tasks/<activity>` at current main tip on promotion; job spec carries `{branch, base_sha}`
+- [ ] Hub-generated pre-receive hook enforces: ref-match + token-match + fast-forward; denies pushes to any other ref incl. main
+- [ ] One-time rebase/force authorization records (granted by hub, consumed by hook)
+- [ ] Lease-expiry requeue appends on the same branch (no reset)
+- [ ] Serialized per-repo landing queue in scheduler (ff-merge when descendant; else emit rebase instruction — R4)
+
+**Acceptance (hub BDD):** push to wrong ref → rejected; push to task ref with wrong token → rejected; non-ff push without authorization → rejected; authorized rebase push → accepted once, replay rejected; after audit-complete, main ff-merges the branch; concurrent-landing fixture produces exactly one merge + one rebase instruction.
+
+### R3 — In-container checkout rework
+- [ ] Worker clones from gitserver (full clone, task branch) using CA + token; checks out `{branch, base_sha}`
+- [ ] Delete worktree code path and `CHECKOUT_STRATEGY` env; remove `/repo` bind mount from worker services
+- [ ] Checkout deleted on task end (exit-after-task makes the container itself ephemeral)
+
+**Acceptance (worker BDD):** checkout scenario reworked — clone source is the gitserver URL fixture (fake hub/git server), correct branch checked out, workspace contains the branch content; no worktree/`/repo` references remain in worker code or compose.
+
+### R4 — SSE worker-agent protocol + session model
+- [ ] Registration endpoint (well-known URL): worker announces → hub issues session id (scoped to container lifetime)
+- [ ] Per-session SSE endpoint with fresh buffer (no last-event-id); instruction buffering while no live session (restart window)
+- [ ] Instruction event types: `work_offer`, `auditor_feedback`, `retrospective_prompt`, `repair`, `rebase` (carries target main SHA + force-window ref), extensible `custom`
+- [ ] Register-then-offer replaces `GET /api/work` polling (remove or demote to bootstrap/fallback); worker→hub acks via API
+- [ ] Worker hosts a Pi agent session; instructions arrive as turn inputs; exit-after-task + `restart: always` wired in compose
+
+**Acceptance (worker BDD + integration):** session lifecycle scenario (register → receive instruction → ack → exit); reconnect-after-restart scenario delivers buffered instruction; e2e shows auditor feedback and retrospective prompt consumed as Pi turns; no polling loop remains.
+
+### R5 — Auditor + gates on committed state
+- [ ] Mechanical gate reads switch from Postgres blobs to bare-repo tree at task-branch tip (`git show`/archive read)
+- [ ] Auditor agent prompt/tooling reads the same committed state (incl. post-rebase re-audit round before merge)
+- [ ] Remove evidence-upload API + `artifacts` content column → lineage index (path ↔ commit ↔ HF revision)
+- [ ] Remove `inputs_evidence` injection; dependents clone main (evidence via merged history)
+- [ ] Churn-minimizing landing policy implemented (rebase only at landing turn; deferrable under high concurrency)
+
+**Acceptance (hub BDD + e2e):** gate criteria evaluated against committed files; sabotage run fails on committed evidence; audited-complete merge lands exactly the audited SHA; rebase path triggers re-audit before merge; Postgres contains zero research content (schema + row audit).
+
+### R6 — Librarian as secretary (agent)
+- [ ] Librarian agent (hub-side pi session, small/mid tier): operationalizes director intent into worker-facing specifics — artifact paths/refs, retrospective/summarize/archival follow-up requests — delivered via R4 instruction events
+- [ ] Retention execution: preserve branch + commit summary note to main for every attempt (success and failure)
+- [ ] Lineage index maintenance (git ↔ HF pointers)
+- [ ] Role-shaping skill authored framework-side (`skills/librarian/`)
+
+**Acceptance (integration + e2e):** work_offer events carry librarian-authored operational details; every completed/failed attempt yields a note commit on main referencing the branch; librarian never decides research direction (skill constraint test).
+
+### R7 — Demo seeding + validation rework
+- [ ] Bootstrap seeds `data/repos/demo.git` from `examples/demo-project`; framework repo no longer mounted to workers
+- [ ] Migrate role-shaping skills (auditor/reflector/librarian) from `examples/demo-project/skills/` to framework `skills/`; demo project keeps only worker-task-specific skills
+- [ ] e2e rework — new git-plane checks: task branch pre-created; push denied to wrong refs; audited-complete merge lands on main; failed repair preserved + summary note committed; rebase path exercised (concurrent fixture)
+- [ ] Worker BDD: SSE-instruction + session-lifecycle scenarios; hub BDD: hook/merge scenarios (R2)
+- [ ] Skill (`autoresearch-e2e`) + incidents log extended for the new stack (gitserver, CA, sessions, exit-after-task)
+- [ ] Dashboard truth-aligned: branch/merge events in the activity feed; attempt notes visible
+
+**Acceptance:** full e2e green on the deployed R-stack (all prior 20 checks reworked + new git-plane checks); both BDD suites green; demo quick-start (Part E) updated and passing; skill updated.
+
+### R-series dependency order
+
+```
+R1 → R2 → R3 → R4 → R5 → R6 → R7
+     (R4 can start after R2: instruction schema needs task-branch concepts;
+      R5 needs R4 for rebase instructions; R6 needs R4+R5; R7 last)
+```
+
 ## Dependency order
 
 ```
-M0 → M1 → M2 → M3 → M4 → M5 → M6 → M7 → M8 → M9 → M10 → P4
+M0 → M1 → M2 → M3 → M4 → M5 → M6 → M7 → M8 → M9 → M10 → R-series → P4
                 (M4 can start after M2; M5 spike after M3)
+R1 → R2 → R3 → R4 → R5 → R6 → R7   (R4 startable after R2; R7 last)
 ```
 
 ## Standing workstreams
