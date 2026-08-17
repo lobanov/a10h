@@ -206,7 +206,7 @@ export function checkout(job: JobSpec): { dir: string; branch: string } {
 }
 
 /** Commit work products and push them to the job's task branch. */
-export function commitAndPush(job: JobSpec, dir: string): { pushed: boolean; detail: string } {
+export function commitAndPush(job: JobSpec, dir: string): { pushed: boolean; detail: string; sha?: string } {
   const repo = job.repo ?? "demo";
   const url = originUrl(repo);
   sh("git", ["remote", "set-url", "origin", url], { cwd: dir });
@@ -217,8 +217,9 @@ export function commitAndPush(job: JobSpec, dir: string): { pushed: boolean; det
   if (r.code !== 0) return { pushed: false, detail: `commit failed: ${r.stderr.slice(0, 300)}` };
   if (!job.branch) return { pushed: false, detail: "no branch" };
   r = sh("git", ["push", "--quiet", "origin", `HEAD:${job.branch}`], { cwd: dir });
-  if (r.code !== 0) return { pushed: false, detail: `push failed: ${r.stderr.slice(0, 300)}` };
-  return { pushed: true, detail: "pushed" };
+  if (r.code !== 0) return { pushed: false, detail: `push failed: ${r.stderr.replace(/https:\/\/[^@/]+@/g, "https://***@").slice(0, 300)}` };
+  const sha = sh("git", ["rev-parse", "HEAD"], { cwd: dir }).stdout.trim();
+  return { pushed: true, detail: "pushed", sha };
 }
 
 interface Tailer {
@@ -309,24 +310,6 @@ export function startProgressTail(job: JobSpec, workspace: string, onCancel: () 
   };
 }
 
-async function collectAndUpload(job: JobSpec, workspace: string): Promise<void> {
-  const body: { evidence: Array<{ path: string; content: string }>; artifacts: Array<{ path: string; content: string }> } = {
-    evidence: [],
-    artifacts: [],
-  };
-  for (const rel of job.outputs?.evidence ?? []) {
-    const p = join(workspace, rel);
-    if (existsSync(p)) body.evidence.push({ path: rel, content: capAtLineBoundary(readFileSync(p, "utf8"), 256 * 1024) });
-    else console.log(`[${NODE_ID}] job ${job.id}: evidence file missing: ${rel}`);
-  }
-  for (const rel of job.outputs?.artifacts ?? []) {
-    const p = join(workspace, rel);
-    if (existsSync(p)) body.artifacts.push({ path: rel, content: capAtLineBoundary(readFileSync(p, "utf8"), 256 * 1024) });
-  }
-  const res = await hub(`/api/jobs/${job.id}/result`, { method: "POST", body: JSON.stringify(body) });
-  if (!res.ok) console.log(`[${NODE_ID}] result upload failed: ${res.status}`);
-}
-
 export async function executeJob(job: JobSpec): Promise<void> {
   busy = true;
   let checkoutDir = "";
@@ -392,14 +375,13 @@ export async function executeJob(job: JobSpec): Promise<void> {
     await new Promise((r) => setTimeout(r, 500));
     // Git plane: commit work products and push to the task branch (partial
     // dead work on failures stays visible for audit — attempts append).
+    // R5: evidence IS the committed state — the pushed SHA travels with the
+    // terminal status and gates read it from the bare repo (no uploads).
     const push = commitAndPush(job, checkoutDir);
     console.log(`[${NODE_ID}] job ${job.id}: task-branch push ${push.detail}`);
-    console.log(`[${NODE_ID}] job ${job.id}: collecting evidence...`);
-    await collectAndUpload(job, workspace);
-    console.log(`[${NODE_ID}] job ${job.id}: evidence collected; posting terminal status...`);
     const statusRes = await hub(`/api/jobs/${job.id}/status`, {
       method: "POST",
-      body: JSON.stringify({ state, exit_code: exitCode, attempt: job.attempt }),
+      body: JSON.stringify({ state, exit_code: exitCode, attempt: job.attempt, pushed_sha: push.sha ?? undefined }),
     });
     if (!statusRes.ok) {
       console.log(`[${NODE_ID}] job ${job.id}: terminal status POST rejected (${statusRes.status}) — attempt superseded`);

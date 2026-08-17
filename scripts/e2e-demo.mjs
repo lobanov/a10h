@@ -17,7 +17,7 @@
  *     against protocols/progress.schema.json (via protocols/validate.mjs)
  */
 import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -149,13 +149,16 @@ async function main() {
   for (const job of planJobs) {
     if (job.status !== "succeeded" && job.activity !== "repair-demo") continue;
     const arts = await api(`/api/jobs/${job.id}/artifacts`);
-    const progress = arts.artifacts.find((a) => a.path.endsWith("progress.jsonl"));
-    if (!progress) continue;
+    // R5: lineage only — content is read from the bare repo at commit_sha.
+    const progressLine = arts.artifacts.find((a) => a.path.endsWith("progress.jsonl"));
+    const metricsLine = arts.artifacts.find((a) => a.kind === "evidence" && a.path.endsWith("metrics.json"));
+    if (!progressLine) continue;
     const dir = join(tmp, job.activity ?? job.id);
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "progress.jsonl"), progress.content ?? "");
-    const metrics = arts.artifacts.find((a) => a.kind === "evidence" && a.path.endsWith("metrics.json"));
-    if (metrics) writeFileSync(join(dir, "metrics.json"), metrics.content ?? "");
+    const show = (line) =>
+      execFileSync("git", ["--git-dir", join(ROOT, "data/repos/demo.git"), "show", `${line.commit_sha}:${line.path}`], { encoding: "utf8", maxBuffer: 8 * 1024 * 1024 });
+    writeFileSync(join(dir, "progress.jsonl"), show(progressLine));
+    if (metricsLine) writeFileSync(join(dir, "metrics.json"), show(metricsLine));
     validatedRuns++;
   }
   if (validatedRuns > 0) {

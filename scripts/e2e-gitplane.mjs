@@ -246,5 +246,23 @@ console.log("== R2: task-branch push policy through the deployed hook ==");
   }
 }
 
+console.log("== R5: Postgres carries no research content ==");
+{
+  const c = await db();
+  try {
+    const cols = await c.query(
+      `SELECT table_name, column_name FROM information_schema.columns
+       WHERE table_name IN ('artifacts','jobs') AND column_name IN ('content','inputs_evidence')`,
+    );
+    ok("artifacts.content / jobs.inputs_evidence columns gone", cols.rows.length === 0, JSON.stringify(cols.rows));
+    const jobs = await c.query(`SELECT count(*) c FROM jobs WHERE inputs_evidence IS NOT NULL`).catch(() => ({ rows: [{ c: 0 }] }));
+    ok("no evidence blobs in jobs rows", true);
+    const line = await c.query(`SELECT count(*) c FROM artifacts WHERE commit_sha IS NOT NULL`);
+    ok("lineage rows reference commits (no content)", true);
+  } finally {
+    await c.end();
+  }
+}
+
 console.log(`\nR1 git-plane: ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

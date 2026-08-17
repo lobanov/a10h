@@ -176,3 +176,15 @@ ALTER TABLE worker_sessions ADD COLUMN IF NOT EXISTS streaming BOOLEAN NOT NULL 
 -- R4 review: bind each job offer to exactly one session (accept-time identity
 -- check; prevents double-execution via late acks).
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS offer_session TEXT;
+
+-- R5: gates/verification read COMMITTED state. Evidence lives only in git;
+-- the worker reports the pushed SHA with its terminal status. Postgres keeps
+-- a lineage index (path <-> commit <-> future HF revision) — never content.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS pushed_sha TEXT;
+ALTER TABLE jobs DROP COLUMN IF EXISTS inputs_evidence;
+ALTER TABLE artifacts DROP COLUMN IF EXISTS content;
+ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS commit_sha TEXT;
+
+-- R5: the SHA a gate result was verified against — merges land EXACTLY the
+-- verified tip; a rebased tip re-enters verification before merging.
+ALTER TABLE gate_results ADD COLUMN IF NOT EXISTS evaluated_sha TEXT;

@@ -57,19 +57,31 @@ The runner tails this file and relays lines to the hub
 
 Schema: [`progress.schema.json`](progress.schema.json)
 
-## 3. Evidence contract
+## 3. Evidence contract (R5: evidence IS committed state)
 
-- Files listed in `outputs.evidence` are uploaded to the hub with the job
-  result and become the inputs to **gate evaluation** (mechanical checks) and
-  **secretary verification** (reasonableness). Evidence is reproducibility-bearing:
-  seeds, config hashes, metric files.
-- Large artifacts belong on HuggingFace (recorded in the project's artifact
-  registry by the secretary); evidence files are small by design.
+- Evidence files are **committed to the job's task branch** — never uploaded.
+  The worker pushes its work to `refs/tasks/<plan>/<activity>` and reports
+  the pushed commit SHA with its terminal status
+  (`POST /api/jobs/:id/status` with `pushed_sha`).
+- **Gate evaluation** (mechanical checks) and **secretary verification**
+  read the declared `outputs.evidence` paths at exactly that SHA from the
+  hub's bare repo — no tree-wide search, no Postgres blobs. A criterion's
+  `file` resolves only against the declared list (a decoy file elsewhere in
+  the tree cannot satisfy a gate).
+- Upstream evidence reaches dependent activities through **merged main**
+  (dependents' task branches are cut from main after their dependencies
+  land) — there is no evidence materialization/injection.
+- Large artifacts belong on HuggingFace (hub-side access; the secretary
+  maintains the lineage index); evidence files are small by design.
 
 ## 4. Lease & cancellation semantics
 
-- Workers **pull** work (`GET /api/work?node=<id>`); a granted job is leased
-  with a TTL renewed by heartbeats/status/event posts.
+- Workers **register** (`POST /api/nodes/register`) and receive work as SSE
+  `work_offer` instructions on their session stream (`GET
+  /api/worker-sessions/:id/events`); accepting an offer leases the job
+  (`POST /api/worker-sessions/:id/ack` with `accept_offer`). `GET /api/work`
+  is a demoted bootstrap/fallback. A leased job carries a TTL renewed by
+  status/event posts.
 - Lease expiry (runner death, network partition) → job re-queued with
   `attempt+1`, capped by the hub's retry policy; the demo exposes the requeue
   as a live SSE event.

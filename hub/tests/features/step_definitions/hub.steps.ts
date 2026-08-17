@@ -9,7 +9,7 @@ import { After, AfterAll, BeforeAll, Given, Then, When } from "@cucumber/cucumbe
 import pg from "pg";
 import assert from "node:assert";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,7 +30,7 @@ activities:
   alpha:
     title: alpha
     depends_on: []
-    job: {image: "python:3.12-slim", command: ["true"], requirements: {cpu: 1}}
+    job: {image: "python:3.12-slim", command: ["true"], requirements: {cpu: 1}, outputs: {evidence: ["runs/x/metrics.json"]}}
     exit_gate:
       id: alpha-gate
       criteria:
@@ -286,14 +286,14 @@ When("a worker completes the job of {string} with final_loss {float}", async fun
     body: JSON.stringify({ t: 1, pct: 100, stage: "done", state: "succeeded", metrics: { loss } }),
   });
   assert.ok(ev.ok);
-  const result = await api(`/api/jobs/${jobId}/result`, {
-    method: "POST",
-    body: JSON.stringify({ evidence: [{ path: "runs/x/metrics.json", content: JSON.stringify(metrics) }] }),
-  });
-  assert.ok(result.ok);
+  // R5: evidence is COMMITTED state — write it into the fixture bare repo
+  // on the job's task branch, then report the pushed SHA with the status.
+  const jobRow = await hubMod.pool.query(`SELECT repo, branch FROM jobs WHERE id = $1`, [jobId]);
+  const branch = jobRow.rows[0]?.branch as string;
+  const sha = commitFixtureFile("demo", branch, "runs/x/metrics.json", JSON.stringify(metrics));
   const status = await api(`/api/jobs/${jobId}/status`, {
     method: "POST",
-    body: JSON.stringify({ state: "succeeded", exit_code: 0 }),
+    body: JSON.stringify({ state: "succeeded", exit_code: 0, pushed_sha: sha }),
   });
   assert.ok(status.ok);
 });
@@ -304,6 +304,28 @@ When("a cyclic plan graph is submitted", async function () {
 });
 
 // ---------- R2 git-plane steps (git-plane.feature) ----------
+
+/** Commit a file onto a fixture bare-repo branch; returns the new tip SHA. */
+function commitFixtureFile(repo: string, branch: string, file: string, content: string): string {
+  const gitDir = join(reposDir, `${repo}.git`);
+  const wt = mkdtempSync(join(tmpdir(), "bdd-wt-"));
+  try {
+    execFileSync("git", ["clone", "-q", "--no-hardlinks", gitDir, wt], { stdio: "ignore" });
+    execFileSync("git", ["fetch", "-q", "origin", branch], { cwd: wt, stdio: "ignore" });
+    execFileSync("git", ["checkout", "-q", "-B", "work", "FETCH_HEAD"], { cwd: wt, stdio: "ignore" });
+    mkdirSync(dirname(join(wt, file)), { recursive: true });
+    writeFileSync(join(wt, file), content);
+    execFileSync("git", ["add", "-A"], { cwd: wt, stdio: "ignore" });
+    execFileSync("bash", ["-c",
+      `cd '${wt}' && git -c user.name=bdd -c user.email=bdd@local commit -q -m 'bdd: evidence'`], { stdio: "ignore" });
+    // Push the commit into the bare fixture (update-ref alone would point at
+    // an object the bare repo does not have).
+    execFileSync("git", ["push", "-q", "origin", `work:${branch}`], { cwd: wt, stdio: "ignore" });
+    return execFileSync("git", ["rev-parse", "HEAD"], { cwd: wt, encoding: "utf8" }).trim();
+  } finally {
+    rmSync(wt, { recursive: true, force: true });
+  }
+}
 
 /** Plan-scoped task ref (R2 review fix: refs/tasks/<plan>/<activity>). */
 const tref = (activity: string): string => `refs/tasks/${planName}/${activity}`;
@@ -422,9 +444,11 @@ Given("the job is leased by node {string} and pushed a commit to {string}", asyn
 Given("the job succeeded with gate pass and audit note", async function () {
   await hubMod.pool.query(`UPDATE jobs SET status = 'succeeded' WHERE id = $1`, [r2.jobId]);
   await hubMod.tick(); // gate evaluation (no gate declared -> job_state decides -> pass)
+  // Verified-complete is SHA-pinned: the audit must cover the branch tip.
+  const tipSha = bare(["rev-parse", tref("alpha")]);
   await hubMod.pool.query(
-    `UPDATE gate_results SET audit_note = '{"verdict":"agree_pass"}' WHERE plan_id = $1 AND activity = 'alpha'`,
-    [planName],
+    `UPDATE gate_results SET audit_note = '{"verdict":"agree_pass"}', evaluated_sha = $2 WHERE plan_id = $1 AND activity = 'alpha'`,
+    [planName, tipSha],
   );
 });
 
@@ -444,10 +468,13 @@ Given('activities "alpha" and "beta" both verified-complete with diverged branch
     await hubMod.pool.query(`UPDATE jobs SET status = 'succeeded' WHERE id = $1`, [j.id]);
   }
   await hubMod.tick(); // gate evaluation for both
-  await hubMod.pool.query(
-    `UPDATE gate_results SET audit_note = '{"verdict":"agree_pass"}' WHERE plan_id = $1`,
-    [planName],
-  );
+  for (const activity of ["alpha", "beta"]) {
+    const tip = bare(["rev-parse", tref(activity)]);
+    await hubMod.pool.query(
+      `UPDATE gate_results SET audit_note = '{"verdict":"agree_pass"}', evaluated_sha = $2 WHERE plan_id = $1 AND activity = $3`,
+      [planName, tip, activity],
+    );
+  }
 });
 
 When('the hook is asked about a push of ref {string} from old {string} to a new commit', async function (refArg: string, _seed: string) {

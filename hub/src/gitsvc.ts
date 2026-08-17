@@ -410,6 +410,63 @@ export async function syncUpstream(repo: string): Promise<{ synced: boolean; mai
   });
 }
 
+/**
+ * R5: read declared evidence files at an exact commit from the bare repo.
+ * Paths resolve ONLY against the job's declared outputs.evidence list (no
+ * tree-wide search — a sabotaged decoy file cannot satisfy a criterion).
+ */
+export async function readEvidenceAt(
+  repo: string,
+  sha: string,
+  declared: string[],
+  maxBytes = 256 * 1024,
+): Promise<Array<{ path: string; content: string }>> {
+  const dir = repoDir(repo);
+  const out: Array<{ path: string; content: string }> = [];
+  for (const p of declared) {
+    if (!/^[A-Za-z0-9._\/-]+$/.test(p) || p.includes("..")) continue;
+    const r = await git(dir, ["show", `${sha}:${p}`]).catch(() => null);
+    if (!r) continue;
+    out.push({ path: p, content: r.stdout.slice(0, maxBytes) });
+  }
+  return out;
+}
+
+/** Resolve a criterion's `file` (possibly a bare name) against declared paths. */
+export function resolveEvidencePath(file: string, declared: string[]): string | null {
+  if (declared.includes(file)) return file;
+  const hit = declared.find((p) => p.endsWith("/" + file));
+  return hit ?? null;
+}
+
+export async function gitRevParse(repo: string, ref: string): Promise<string | null> {
+  try {
+    const r = await git(repoDir(repo), ["rev-parse", "--verify", "--quiet", ref]);
+    return r.stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function pathExistsAt(repo: string, sha: string, path: string): Promise<boolean> {
+  if (!/^[A-Za-z0-9._\/-]+$/.test(path) || path.includes("..")) return false;
+  try {
+    await git(repoDir(repo), ["cat-file", "-e", `${sha}:${path}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function gitIsAncestor(repo: string, ancestor: string, descendant: string): Promise<boolean> {
+  try {
+    await git(repoDir(repo), ["merge-base", "--is-ancestor", ancestor, descendant]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function reposDir(): string {
   return REPOS_DIR;
 }

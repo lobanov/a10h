@@ -277,6 +277,7 @@ export function createHttpServer(): ReturnType<typeof createHttpServerRaw> {
           state?: string;
           exit_code?: number;
           attempt?: number;
+          pushed_sha?: string;
         };
         if (!body.state || !["running", "succeeded", "failed", "cancelled"].includes(body.state)) {
           return json(res, 400, { error: "state must be running|succeeded|failed|cancelled" });
@@ -298,8 +299,9 @@ export function createHttpServer(): ReturnType<typeof createHttpServerRaw> {
           return json(res, 200, { ok: true, cancel: fresh.rows[0]?.cancel_requested ?? false });
         }
         await pool.query(
-          `UPDATE jobs SET status = $2, exit_code = $3, lease_expires = NULL, updated_at = now() WHERE id = $1`,
-          [jobId, body.state, body.exit_code ?? null],
+          `UPDATE jobs SET status = $2, exit_code = $3, lease_expires = NULL,
+             pushed_sha = COALESCE($4, pushed_sha), updated_at = now() WHERE id = $1`,
+          [jobId, body.state, body.exit_code ?? null, body.pushed_sha ?? null],
         );
         if (["succeeded", "failed", "cancelled"].includes(body.state) && job.rows[0].node) {
           await pool.query(`UPDATE nodes SET state = 'idle' WHERE id = $1`, [job.rows[0].node]);
@@ -309,35 +311,15 @@ export function createHttpServer(): ReturnType<typeof createHttpServerRaw> {
         return json(res, 200, { ok: true });
       }
 
-      const resultMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/result$/);
-      if (resultMatch && req.method === "POST") {
-        const jobId = resultMatch[1];
-        const body = JSON.parse((await readBody(req)).toString("utf8")) as {
-          evidence?: Array<{ path: string; content: string }>;
-          artifacts?: Array<{ path: string; content: string }>;
-        };
-        const job = await pool.query(`SELECT id FROM jobs WHERE id = $1`, [jobId]);
-        if (job.rowCount === 0) return json(res, 404, { error: "job not found" });
-        for (const kind of ["evidence", "artifacts"] as const) {
-          for (const file of body[kind] ?? []) {
-            await pool.query(
-              `INSERT INTO artifacts (job_id, kind, path, content) VALUES ($1, $2, $3, $4)`,
-              [jobId, kind === "evidence" ? "evidence" : "artifact", file.path, file.content.slice(0, 256 * 1024)],
-            );
-          }
-        }
-        bus.publish("job_result", { job_id: jobId, evidence: (body.evidence ?? []).length, artifacts: (body.artifacts ?? []).length });
-        return json(res, 200, { ok: true });
-      }
-
       const artifactsMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/artifacts$/);
       if (artifactsMatch && req.method === "GET") {
-        const jobId = artifactsMatch[1];
+        // R5: lineage index only (path <-> commit). Content lives in git —
+        // read it from the bare repo at commit_sha.
         const rows = await pool.query(
-          `SELECT kind, path, content FROM artifacts WHERE job_id = $1 ORDER BY id`,
-          [jobId],
+          `SELECT path, kind, commit_sha FROM artifacts WHERE job_id = $1 ORDER BY path`,
+          [artifactsMatch[1]],
         );
-        return json(res, 200, { job_id: jobId, artifacts: rows.rows });
+        return json(res, 200, { artifacts: rows.rows });
       }
 
       const cancelMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/cancel$/);

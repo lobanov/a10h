@@ -2,7 +2,16 @@ import { pool } from "./db.ts";
 import { bus } from "./bus.ts";
 import { evaluateCriteria, type Criterion, type EvidenceFile } from "./gates.ts";
 import { queueAudit, queueDirector } from "./agents.ts";
-import { createTaskBranch, landBranch } from "./gitsvc.ts";
+import {
+  createTaskBranch,
+  landBranch,
+  readEvidenceAt,
+  resolveEvidencePath,
+  pathExistsAt,
+  taskRef as taskRefOf,
+  gitRevParse,
+  gitIsAncestor,
+} from "./gitsvc.ts";
 import {
   offerJobToSession,
   idleSessionsForJob,
@@ -170,40 +179,18 @@ async function promoteReadyActivities(): Promise<void> {
       const deps = (act.depends_on as string[]) ?? [];
       const depsOk = deps.every((d) => {
         const dep = byId.get(d);
-        // Dependents proceed when the dependency passed, or was resolved/failed-final
-        // after escalation (operator disposition) — recorded honestly on the activity.
-        return dep && ["passed", "resolved", "failed_final"].includes(dep.status);
+        if (!dep) return false;
+        // Dependents build on MERGED main (DESIGN §3.2.1): a passed
+        // dependency counts only once its audited-complete merge landed;
+        // resolved/failed-final (operator disposition) also unblock.
+        if (dep.status === "passed") return dep.merged_sha !== null;
+        return ["resolved", "failed_final"].includes(dep.status);
       });
       if (!depsOk) continue;
-      // Cross-activity evidence closure (transitive deps).
-      const closure = new Set<string>();
-      const collect = (id: string) => {
-        for (const dep of (byId.get(id)?.depends_on as string[]) ?? []) {
-          if (!closure.has(dep)) {
-            closure.add(dep);
-            collect(dep);
-          }
-        }
-      };
-      collect(act.id);
-      const inputsEvidence: Array<{ path: string; content: string }> = [];
-      for (const dep of closure) {
-        const depRows = await pool.query(
-          `SELECT a.path, a.content FROM artifacts a
-           JOIN activities act2 ON act2.plan_id = $1 AND act2.id = $2 AND act2.job_id = a.job_id
-           WHERE a.kind = 'evidence'`,
-          [plan.id, dep],
-        );
-        for (const r of depRows.rows) {
-          if (r.content !== null && !inputsEvidence.some((x) => x.path === r.path)) {
-            inputsEvidence.push({ path: r.path, content: r.content });
-          }
-        }
-      }
       // M10 isolation: one failing promotion must not poison the tick's
       // later phases (gates/landing/sweeper) for every other plan.
       try {
-        await promoteOneActivity(repo, plan, act, inputsEvidence);
+        await promoteOneActivity(repo, plan, act);
       } catch (e) {
         console.error(`[scheduler] promote ${plan.id}/${act.id} failed:`, (e as Error).message);
       }
@@ -216,7 +203,6 @@ async function promoteOneActivity(
   repo: string,
   plan: { id: string; repo_subdir: string | null },
   act: any,
-  inputsEvidence: Array<{ path: string; content: string }>,
 ): Promise<void> {
   const jobId = `${act.id}--a${act.attempt + 1}--${rand()}`;
   const { branch, base_sha } = await createTaskBranch(repo, plan.id, act.id);
@@ -224,9 +210,9 @@ async function promoteOneActivity(
   try {
     await pool.query(
       `INSERT INTO jobs (id, plan_id, activity, image, command, requirements, outputs,
-                         inputs_evidence, workspace_subdir, timeout_s, status, attempt,
+                         workspace_subdir, timeout_s, status, attempt,
                          repo, branch, base_sha)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'queued',$11,$12,$13,$14)`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'queued',$10,$11,$12,$13)`,
       [
         jobId,
         plan.id,
@@ -235,14 +221,13 @@ async function promoteOneActivity(
         JSON.stringify(act.job.command),
         JSON.stringify(act.job.requirements ?? {}),
         JSON.stringify(act.job.outputs ?? {}),
-        JSON.stringify(inputsEvidence),
         plan.repo_subdir,
         act.job.timeout_s ?? 3600,
         act.attempt + 1,
         repo,
         branch,
         base_sha,
-      ],
+      ].slice(0, 13),
     );
     await pool.query(
       `UPDATE activities SET status = 'running', attempt = $1, job_id = $2, updated_at = now()
@@ -279,14 +264,47 @@ export async function runGateEvaluation(job: {
   plan_id: string;
   activity: string;
   status: string;
-}): Promise<void> {
+}, shaOverride?: string): Promise<void> {
   const actRow = await pool.query("SELECT * FROM activities WHERE plan_id = $1 AND id = $2", [job.plan_id, job.activity]);
   const act = actRow.rows[0];
-  const evidenceRows = await pool.query(
-    `SELECT path, content FROM artifacts WHERE job_id = $1 AND kind = 'evidence'`,
+  // R5: evidence is COMMITTED state — read the declared outputs.evidence
+  // files at the worker-reported SHA from the bare repo (no uploads, no
+  // Postgres blobs, no tree-wide search).
+  const jobRow = await pool.query(
+    `SELECT repo, branch, base_sha, pushed_sha, outputs FROM jobs WHERE id = $1`,
     [job.id],
   );
-  const evidence: EvidenceFile[] = evidenceRows.rows.map((r) => ({ path: r.path, content: r.content }));
+  const jr = jobRow.rows[0] ?? {};
+  const repo = (jr.repo as string) ?? "demo";
+  const sha = shaOverride ?? (jr.pushed_sha as string) ?? (jr.base_sha as string) ?? null;
+  const declared = ((jr.outputs as { evidence?: string[] })?.evidence ?? []) as string[];
+  let evidence: EvidenceFile[] = [];
+  if (sha) {
+    try {
+      evidence = await readEvidenceAt(repo, sha, declared);
+    } catch (e) {
+      console.error(`[scheduler] evidence read ${repo}@${sha.slice(0, 8)} failed:`, (e as Error).message);
+    }
+    // Lineage index rows (path <-> commit); content never enters Postgres.
+    // Covers declared evidence AND artifacts (progress.jsonl etc.) —
+    // existence-checked at the sha, content read only for gate evidence.
+    for (const ev of evidence) {
+      await pool.query(
+        `INSERT INTO artifacts (job_id, kind, path, commit_sha) VALUES ($1, 'evidence', $2, $3)`,
+        [job.id, ev.path, sha],
+      ).catch(() => undefined);
+    }
+    const declaredArtifacts = ((jr.outputs as { artifacts?: string[] })?.artifacts ?? []) as string[];
+    for (const p of declaredArtifacts) {
+      const exists = await pathExistsAt(repo, sha, p);
+      if (exists) {
+        await pool.query(
+          `INSERT INTO artifacts (job_id, kind, path, commit_sha) VALUES ($1, 'artifact', $2, $3)`,
+          [job.id, p, sha],
+        ).catch(() => undefined);
+      }
+    }
+  }
   const gate = act.gate as { criteria?: Criterion[] } | null;
 
   let verdict: "pass" | "fail";
@@ -307,9 +325,9 @@ export async function runGateEvaluation(job: {
       : `failed criteria: ${checks.filter((c) => !c.ok).map((c) => c.id).join(", ")}`;
 
   const inserted = await pool.query(
-    `INSERT INTO gate_results (plan_id, activity, job_id, verdict, checks, reason)
-     VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
-    [job.plan_id, job.activity, job.id, verdict, JSON.stringify(checks), reason],
+    `INSERT INTO gate_results (plan_id, activity, job_id, verdict, checks, reason, evaluated_sha)
+     VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+    [job.plan_id, job.activity, job.id, verdict, JSON.stringify(checks), reason, sha],
   );
   const gateResultId = inserted.rows[0].id as number;
   bus.publish("gate", { gate_result_id: gateResultId, plan_id: job.plan_id, activity: job.activity, job_id: job.id, verdict, checks });
@@ -456,13 +474,7 @@ async function landVerifiedActivities(): Promise<void> {
     `SELECT a.plan_id, a.id AS activity, a.job_id, p.repo, a.merged_sha
      FROM activities a
      JOIN plans p ON p.id = a.plan_id
-     JOIN LATERAL (
-       SELECT verdict, audit_note FROM gate_results gr
-       WHERE gr.plan_id = a.plan_id AND gr.activity = a.id
-       ORDER BY gr.id DESC LIMIT 1
-     ) latest ON true
-     WHERE a.status = 'passed' AND a.merged_sha IS NULL
-       AND latest.verdict = 'pass' AND latest.audit_note IS NOT NULL`,
+     WHERE a.status = 'passed' AND a.merged_sha IS NULL`,
   );
   const seen = new Set<string>();
   for (const row of rows.rows) {
@@ -471,6 +483,54 @@ async function landVerifiedActivities(): Promise<void> {
     seen.add(key);
     const repo = row.repo ?? "demo";
     try {
+      // Verified-complete means: latest gate_result is PASS, audited, AND
+      // evaluated at EXACTLY the current branch tip (DESIGN §3.2.1 — merges
+      // land exactly the verified SHA; a rebased/appended tip re-verifies).
+      const tipRow = await pool.query(
+        `SELECT evaluated_sha, verdict, audit_note FROM gate_results
+         WHERE plan_id = $1 AND activity = $2 ORDER BY id DESC LIMIT 1`,
+        [row.plan_id, row.activity],
+      );
+      const latest = tipRow.rows[0];
+      const branch = taskRefOf(row.plan_id, row.activity);
+      const tip = await gitRevParse(repo, branch);
+      if (!tip) continue;
+      const verified =
+        latest &&
+        latest.verdict === "pass" &&
+        latest.audit_note !== null &&
+        latest.evaluated_sha === tip;
+      if (!verified) {
+        // Re-verification round on the current tip: is it a descendant of
+        // main (rebase done or content appended) or does main still diverge
+        // (rebase instruction needed first)?
+        const descendant = await gitIsAncestor(repo, "main", branch);
+        if (descendant) {
+          const jobRow2 = await pool.query(
+            `SELECT id, plan_id, activity, status FROM jobs WHERE id = $1`,
+            [row.job_id],
+          );
+          if (jobRow2.rows[0]) {
+            await runGateEvaluation(jobRow2.rows[0], tip); // re-gate + re-audit at tip
+          }
+        }
+        // non-descendant: emit rebase instruction (below via landBranch hold)
+        const result0 = await landBranch(repo, row.plan_id, row.activity, row.job_id);
+        if (result0.outcome === "held_rebase" && result0.instruction?.fresh) {
+          const jobRow = await pool.query(`SELECT node FROM jobs WHERE id = $1`, [row.job_id]);
+          const node = jobRow.rows[0]?.node as string | undefined;
+          const session = node ? await sessionForNode(node) : null;
+          if (session) {
+            await emitInstruction(session, "rebase", {
+              repo,
+              branch,
+              target_main_sha: result0.instruction.target_main_sha,
+              job_id: row.job_id,
+            });
+          }
+        }
+        continue;
+      }
       const result = await landBranch(repo, row.plan_id, row.activity, row.job_id);
       bus.publish("activity", {
         plan_id: row.plan_id,
@@ -492,7 +552,7 @@ async function landVerifiedActivities(): Promise<void> {
         }
       } else if (
         result.outcome === "held_rebase" &&
-        result.instruction?.fresh && // emit once per stall window, not every tick
+        result.instruction?.fresh &&
         session
       ) {
         await emitInstruction(session, "rebase", {
