@@ -1,0 +1,46 @@
+# Per-project configuration — demo project
+# DESIGN.md §3.5: role→model mapping is configuration, never hardcoded.
+# Tiers feed both LiteLLM routing and the escalation ladder
+# ("second opinion from a more capable model" = move up one tier).
+
+project: demo-curriculum
+visibility: private            # research repo visibility: private|public (case-by-case)
+
+hub:
+  url: ${HUB_URL:-http://localhost:8080}
+
+models:
+  # Tier registry: capability ordering is EXPLICIT here — this is the
+  # single source of truth for "more capable model" (escalations).
+  tiers:
+    strongest:
+      - provider: anthropic/model-x    # via LiteLLM; remote
+    strong:
+      - provider: local/spark-main     # via LiteLLM; vLLM on DGX Spark
+      - provider: anthropic/model-y    # fallback
+    mid:
+      - provider: local/rtx5090-fast   # via LiteLLM; vLLM on 5090
+    small:
+      - provider: local/rtx5090-fast
+
+  roles:
+    director:  strong       # plans, assigns, approves within goal
+    worker:    mid          # executes activities (tier may be raised per-task)
+    auditor:   strong       # gate verification must not be the weakest link
+    librarian: small        # indexing, taxonomy maintenance
+    reflector: strongest    # cross-campaign synthesis
+
+  escalation_second_opinion: strongest   # director's option (a) in DESIGN.md §5.2
+
+resources:
+  # Applies when inference and experiment compute share a node.
+  shared_node_quotas:
+    inference:  { vram: 8G, cpu: 4 }
+    experiments: { vram: 20G, cpu: 12 }
+  note: >
+    Compose-level quotas are soft for VRAM (no hard isolation without MIG).
+    Heavy training campaigns should prefer nodes without a resident model server.
+
+artifacts:
+  git: [code, configs, skills, plans, metrics, reports, retrospectives]
+  huggingface: [checkpoints, datasets]   # none expected in the simulated demo
