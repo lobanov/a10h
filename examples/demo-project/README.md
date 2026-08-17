@@ -103,7 +103,7 @@ cp .env.example .env                          # fill Z_AI_API_KEY (director agen
 # deploy: hub + postgres + two workers (+ local vLLM when weights present)
 docker compose up -d postgres hub
 docker compose --profile worker up -d
-docker compose --profile local-llm up -d vllm   # optional local auditor model
+docker compose --profile local-llm up -d llamacpp  # optional local auditor model (GGUF via llama.cpp)
 
 open http://localhost:8080                     # dashboard: ops view + approvals
 ```

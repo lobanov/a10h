@@ -93,7 +93,7 @@ A multi-agent system (MAS) that operates a research lab for **experimental resea
 
 ### 3.5 Hybrid inference via LiteLLM + model-tier registry
 
-- All agent inference (and optionally local model serving) flows through **LiteLLM**: remote APIs (Anthropic, OpenAI, …) and local servers (vLLM on the 5090/Spark) behind one OpenAI-style endpoint.
+- All agent inference (and optionally local model serving) flows through the **LiteLLM** tier or direct provider endpoints: remote APIs (Anthropic, OpenAI, …) and local servers behind OpenAI-style endpoints. **GGUF-quantized local models are served by llama.cpp (`llama-server`)** — vLLM dropped GGUF support, so safetensors deployments use vLLM and GGUF deployments use llama.cpp; both expose the same `/v1` API shape to the hub's `local` provider tier.
 - **Role→model mapping is per-project configuration**, backed by a **model-tier registry** (e.g., `small`, `mid`, `strong`, `strongest`) that also drives the escalation ladder's "second opinion from a more capable model."
 - **Resource contention policy:** when inference and experiment compute share a node, the worker's compose profile enforces resource quotas (GPU memory/CPU reservations & limits). Soft quotas are imperfect (no hard VRAM isolation without MIG); the policy is documented, and heavy training campaigns may instead schedule on nodes without a resident model server.
 

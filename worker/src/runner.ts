@@ -33,6 +33,7 @@ interface JobSpec {
   inputs_evidence?: Array<{ path: string; content: string }>;
   workspace_subdir?: string | null;
   timeout_s: number;
+  attempt?: number;
 }
 
 export function parseTags(spec: string): Record<string, string | number | boolean> {
@@ -183,7 +184,7 @@ async function executeJob(job: JobSpec): Promise<void> {
   busy = true;
   let checkoutDir = "";
   try {
-    const container = `autoresearch-job-${job.id}`.replace(/[^a-zA-Z0-9_.-]/g, "-");
+    const container = `ar-job-${NODE_ID}-${job.id}`.replace(/[^a-zA-Z0-9_.-]/g, "-");
     console.log(`[${NODE_ID}] executing ${job.id} (${job.image})`);
     checkoutDir = checkout(job);
     const workspace = join(checkoutDir, job.workspace_subdir ?? "");
@@ -197,6 +198,9 @@ async function executeJob(job: JobSpec): Promise<void> {
       console.log(`[${NODE_ID}] job ${job.id}: materialized input ${file.path}`);
     }
 
+    // Clear a stale same-named container (names are worker-unique; only a
+    // dead previous incarnation of this worker could own it).
+    sh("docker", ["rm", "-f", container]);
     // Explicit pull so image fetch time is not billed to the job timeout.
     const pull = sh("docker", ["pull", job.image], { timeout: 600_000 });
     if (pull.code !== 0) console.log(`[${NODE_ID}] docker pull stderr: ${pull.stderr.slice(0, 300)}`);
@@ -217,6 +221,15 @@ async function executeJob(job: JobSpec): Promise<void> {
       killed = true;
       if (containerProc) sh("docker", ["kill", container]);
     });
+
+    // Lease renewal: silent jobs (no progress.jsonl output) must not lose their
+    // lease while genuinely running. Renew every 10s until terminal.
+    const leaseTimer = setInterval(() => {
+      void hub(`/api/jobs/${job.id}/status`, {
+        method: "POST",
+        body: JSON.stringify({ state: "running", attempt: job.attempt }),
+      }).catch(() => undefined);
+    }, 10_000);
 
     const timedOut = { value: false };
     const timeoutTimer = setTimeout(() => {
@@ -240,6 +253,7 @@ async function executeJob(job: JobSpec): Promise<void> {
     });
     clearTimeout(timeoutTimer);
     tailer.stop();
+    clearInterval(leaseTimer);
 
     const state = killed || timedOut.value ? "failed" : exitCode === 0 ? "succeeded" : "failed";
     const elapsed = Math.round((Date.now() - started) / 1000);
@@ -250,7 +264,7 @@ async function executeJob(job: JobSpec): Promise<void> {
     await collectAndUpload(job, workspace);
     await hub(`/api/jobs/${job.id}/status`, {
       method: "POST",
-      body: JSON.stringify({ state, exit_code: exitCode }),
+      body: JSON.stringify({ state, exit_code: exitCode, attempt: job.attempt }),
     });
   } finally {
     if (checkoutDir) rmSync(checkoutDir, { recursive: true, force: true });
@@ -274,7 +288,7 @@ async function main(): Promise<void> {
             console.log(`[${NODE_ID}] job execution error: ${e.message}`);
             void hub(`/api/jobs/${job.id}/status`, {
               method: "POST",
-              body: JSON.stringify({ state: "failed", exit_code: 1 }),
+              body: JSON.stringify({ state: "failed", exit_code: 1, attempt: job.attempt }),
             });
           });
           continue; // immediately look for more work

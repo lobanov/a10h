@@ -239,12 +239,27 @@ export function createHttpServer(): ReturnType<typeof createServer> {
         const body = JSON.parse((await readBody(req)).toString("utf8")) as {
           state?: string;
           exit_code?: number;
+          attempt?: number;
         };
         if (!body.state || !["running", "succeeded", "failed", "cancelled"].includes(body.state)) {
           return json(res, 400, { error: "state must be running|succeeded|failed|cancelled" });
         }
-        const job = await pool.query(`SELECT id, node, status FROM jobs WHERE id = $1`, [jobId]);
+        const job = await pool.query(`SELECT id, node, status, attempt FROM jobs WHERE id = $1`, [jobId]);
         if (job.rowCount === 0) return json(res, 404, { error: "job not found" });
+        // Stale-attempt guard: after a lease-expiry requeue, a zombie attempt
+        // must not overwrite the live attempt's state.
+        if (typeof body.attempt === "number" && body.attempt !== job.rows[0].attempt) {
+          return json(res, 409, { error: `stale attempt ${body.attempt} (current: ${job.rows[0].attempt})` });
+        }
+        if (body.state === "running") {
+          // Lease renewal from a live runner (silent jobs emit no progress events).
+          await pool.query(
+            `UPDATE jobs SET status = 'running', lease_expires = now() + interval '${LEASE_TTL_S} seconds', updated_at = now() WHERE id = $1`,
+            [jobId],
+          );
+          const fresh = await pool.query(`SELECT cancel_requested FROM jobs WHERE id = $1`, [jobId]);
+          return json(res, 200, { ok: true, cancel: fresh.rows[0]?.cancel_requested ?? false });
+        }
         await pool.query(
           `UPDATE jobs SET status = $2, exit_code = $3, lease_expires = NULL, updated_at = now() WHERE id = $1`,
           [jobId, body.state, body.exit_code ?? null],
