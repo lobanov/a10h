@@ -9,7 +9,7 @@
     "id": { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$" },
     "activity": { "type": "string" },
     "plan_id": { "type": "string" },
-    "image": { "type": "string", "minLength": 1 },
+    "image": { "type": "string", "minLength": 1, "description": "Advisory stack declaration (e.g. python:3.12-slim). Workers host workloads as subprocesses; the worker image must carry the runtimes it serves, matched via node capability tags." },
     "command": {
       "type": "array",
       "items": { "type": "string" },

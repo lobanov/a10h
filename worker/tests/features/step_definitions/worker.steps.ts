@@ -5,7 +5,7 @@
  */
 import { After, AfterAll, BeforeAll, Given, Then, When } from "@cucumber/cucumber";
 import { createServer, type Server } from "node:http";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -199,3 +199,60 @@ Then("the checkout contains {string}", function (file: string) {
 Then("the checkout is not the origin itself", function () {
   assert.notEqual(checkoutDir, this.origin);
 });
+
+// ---------- workload subprocess hosting ----------
+
+When("a workload runs the command {string}", async function (cmdLine: string) {
+  const m = cmdLine.match(/^([^' ]+) -c '(.+)'$/);
+  const command = m ? [m[1], "-c", m[2]] : cmdLine.split(" ");
+  const handle = runner.runWorkload({ command, cwd: workspace, timeout_s: 30 });
+  this.workload = await handle.done;
+});
+
+When("a workload runs the command {string} with timeout {int} second", async function (cmdLine: string, seconds: number) {
+  const before = process.hrtime.bigint();
+  this.beforeSleepPids = sleepPids();
+  // sh -c so quoted bodies with shell syntax stay one command string
+  const m = cmdLine.match(/^([^' ]+) -c '(.+)'$/);
+  const command = m ? [m[1], "-c", m[2]] : cmdLine.split(" ");
+  const handle = runner.runWorkload({ command, cwd: workspace, timeout_s: seconds });
+  this.workload = await handle.done;
+  this.elapsedMs = Number(process.hrtime.bigint() - before) / 1e6;
+});
+
+Then("the workload exit code is {int}", function (code: number) {
+  assert.equal(this.workload.exitCode, code);
+});
+
+Then("the workload exit code is nonzero", function () {
+  assert.notEqual(this.workload.exitCode, 0);
+});
+
+Then("the workload was killed by timeout", function () {
+  assert.equal(this.workload.timedOut, true);
+  assert.ok(this.elapsedMs < 15000, `timeout kill took ${Math.round(this.elapsedMs)}ms (expected ~1s)`);
+});
+
+Then("the workspace file {string} contains {string}", function (file: string, content: string) {
+  const text = readFileSync(join(workspace, file), "utf8");
+  assert.ok(text.includes(content), `expected "${content}" in "${text}"`);
+});
+
+Then("the sleep subprocess is no longer running", function () {
+  // Only processes created by this scenario count (unrelated host sleeps excluded).
+  const survivors = sleepPids().filter((p) => !(this.beforeSleepPids ?? []).includes(p));
+  assert.equal(survivors.length, 0, `surviving sleep processes: ${survivors.join("; ")}`);
+});
+
+function sleepPids(): string[] {
+  try {
+    return execFileSync("sh", ["-c", "ps -eo pid,comm | awk '$2 ~ /sleep/ {print $1}' || true"], {
+      encoding: "utf8",
+    })
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}

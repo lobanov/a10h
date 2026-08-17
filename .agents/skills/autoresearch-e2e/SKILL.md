@@ -38,7 +38,6 @@ Model facts (do not rediscover):
   them (GGUF embeds everything). Only vLLM would want sidecars — skip vLLM.
 - `--hf-overrides` with compose *string* `command:` gets mangled by shlex →
   use YAML **list-form** `command:` for anything containing quotes.
-
 ## 2. Run the E2E
 
 ```bash
@@ -97,9 +96,17 @@ Git **ignores** `safe.directory` via `-c` (security). It must be global config
 add it there; never try to pass `-c safe.directory=*`.
 
 **Worker logs: "Conflict. The container name … is already in use"**
-Stale job container from a killed worker. Fixed by worker-unique names
-(`ar-job-<worker>-<job>`) + `docker rm -f` pre-clean. Clear strays:
-`docker rm -f $(docker ps -aq --filter name=ar-job-)`.
+Obsolete — workers no longer launch job containers at all (workloads are
+subprocesses; see next entry). Historical root cause kept in incidents.md.
+
+**Workload subprocess fails to start / `python: command not found`**
+Workers host workloads as **subprocesses inside the worker container** (no
+docker socket — by design, security). The worker image must carry the runtimes
+it serves (`worker/Dockerfile` installs python3 + `python-is-python3`).
+Advertise runtimes via `NODE_TAGS` (e.g. `python:3.12`) and match with job
+`requirements.tags`. Workload env is minimal (PATH, HOME=/tmp, LANG) plus
+explicit `JOB_ENV_*` passthrough — missing env is usually a passthrough gap,
+not a bug.
 
 **Job requeued while visibly running (`sleep`-style silent jobs)**
 Silent jobs emit no progress events → lease never renewed → hub requeues a
@@ -126,9 +133,11 @@ Evidence paths in `outputs.evidence` are **relative to the project root**
 (the workspace mount), and upstream evidence is materialized from transitive
 deps' artifacts — verify with `GET /api/jobs/<id>/artifacts`.
 
-**Root-owned files under `data/work-*` (Permission denied on cleanup)**
-Job containers run as the runner uid (`-u` flag). Don't disable
-`RUN_AS_HOST_USER`; if stuck: `docker run --rm -v <dir>:/w alpine rm -rf /w/<job>`.
+**Root-owned files under `data/work-*`**
+Workload subprocesses run as the worker container user (root by default) and
+write into the bind-mounted work dir; the worker cleans checkouts itself. If
+a worker dies mid-job, clear leftovers with
+`docker run --rm -v <dir>:/w alpine rm -rf /w/<job>`.
 
 **BDD suite oddities** (hub/tests, worker/tests): scenarios share the scratch
 DB → truncate in the `After` hook; unquoted paths in Gherkin steps split on

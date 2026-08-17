@@ -102,9 +102,10 @@ A multi-agent system (MAS) that operates a research lab for **experimental resea
 ## 4. Deployment model (docker-compose)
 
 - **Hub compose stack:** `supervisor`, `postgres`, `dashboard`, `litellm`. GPU services optional.
-- **Worker compose profile:** `runner` (+ optional `vllm`). Same image family, different profile/env (`HUB_URL`, node labels like `gpu=rtx5090`, capability tags).
-- Scheduling: jobs declare requirements (e.g., `gpu: true`, `vram: 24GB`, `stack: pytorch`); the hub matches against worker capability tags and lease capacity.
-- Secrets: hub-side `.env` (API keys, HF token, git credentials) never enters the public repo; a `.env.example` documents required variables.
+- **Worker compose profile:** `worker-a`/`worker-b` (+ optional `llamacpp` local model server). Same image family, different profile/env (`HUB_URL`, node labels like `gpu=rtx5090`, capability tags).
+- **Workload hosting (security):** workers host job workloads as **subprocesses inside the worker container** — the host docker socket is *never* mounted. Rationale: workers execute untrusted research code (pulled dependencies, experiment scripts); a compromised workload must not be able to escalate to the host via the docker daemon. Confinement boundary = the worker container itself. Consequences: (a) the job spec's `image` is an **advisory stack declaration**, matched via node capability tags (`requirements.tags` vs `NODE_TAGS`); (b) worker images must be provisioned with the runtimes they serve; (c) cancel/timeout is enforced by SIGKILL on the workload's process group.
+- Scheduling: jobs declare requirements (e.g., `gpu: true`, `vram: 24GB`, `tags: [python:3.12]`); the hub matches against worker capability tags and lease capacity.
+- Secrets: hub-side `.env` (API keys, HF token, git credentials) never enters the public repo; a `.env.example` documents required variables. Workers get no secrets by default; per-job env passthrough is explicit (`JOB_ENV_*`).
 
 ---
 

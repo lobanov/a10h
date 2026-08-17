@@ -4,12 +4,15 @@ import { join, resolve, dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 
 /**
- * Worker runner (M3): pull work from the hub, execute job containers, relay
- * progress/events, upload evidence. Never accepts inbound connections.
+ * Worker runner (M3): pull work from the hub and host job workloads as
+ * **subprocesses inside this container** — no host docker socket, no sibling
+ * containers: a compromised workload stays confined to the worker container
+ * (root inside it, nothing on the host). Never accepts inbound connections.
  *
  * Env: HUB_URL, NODE_ID, NODE_TAGS, REPO_PATH, CHECKOUT_STRATEGY
- * (clone|worktree), WORK_DIR, HOST_WORK_DIR (host-visible path of WORK_DIR,
- * used for docker -v mounts since the docker daemon is the host's).
+ * (clone|worktree), WORK_DIR. The job spec's `image` field is advisory —
+ * a declared stack, matched via node tags; the worker image must carry the
+ * runtimes it serves (worker/Dockerfile).
  */
 
 function getHub(): string {
@@ -20,7 +23,6 @@ const NODE_TAGS = parseTags(process.env.NODE_TAGS ?? "cpu:4");
 const REPO_PATH = resolve(process.env.REPO_PATH ?? "/repo");
 const STRATEGY = process.env.CHECKOUT_STRATEGY === "worktree" ? "worktree" : "clone";
 const WORK_DIR = resolve(process.env.WORK_DIR ?? "/work");
-const HOST_WORK_DIR = process.env.HOST_WORK_DIR ?? WORK_DIR;
 const POLL_MS = 1_000;
 const HEARTBEAT_MS = 10_000;
 
@@ -63,6 +65,81 @@ function sh(cmd: string, args: string[], opts: { cwd?: string; timeout?: number 
   } catch (e: any) {
     return { code: e.status ?? 1, stdout: e.stdout ?? "", stderr: e.stderr ?? e.message };
   }
+}
+
+/** Minimal, explicit environment for job subprocesses (never the worker's own env). */
+function workloadEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    PATH: process.env.PATH ?? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    HOME: "/tmp",
+    LANG: "C.UTF-8",
+  };
+  // Explicit per-job env passthrough on the worker: JOB_ENV_FOO=bar -> FOO=bar.
+  for (const [k, v] of Object.entries(process.env)) {
+    if (k.startsWith("JOB_ENV_") && v !== undefined) env[k.slice("JOB_ENV_".length)] = v;
+  }
+  return env;
+}
+
+export interface WorkloadHandle {
+  done: Promise<{ exitCode: number; killed: boolean; timedOut: boolean }>;
+  kill: (reason: "cancel" | "timeout") => void;
+}
+
+/**
+ * Host one job workload as a detached subprocess group in `cwd`.
+ * Cancel/timeout SIGKILLs the whole group (children cannot outlive the job).
+ */
+export function runWorkload(opts: {
+  command: string[];
+  cwd: string;
+  timeout_s: number;
+  onOutput?: (chunk: string, stream: "out" | "err") => void;
+}): WorkloadHandle {
+  const [cmd, ...args] = opts.command;
+  let killed = false;
+  let timedOut = false;
+  let child: ReturnType<typeof spawn> | null = null;
+
+  const killGroup = () => {
+    if (child?.pid) {
+      try {
+        process.kill(-child.pid, "SIGKILL"); // negative pid = process group
+      } catch {
+        // already gone
+      }
+    }
+  };
+
+  const timer = setTimeout(() => {
+    timedOut = true;
+    killGroup();
+  }, opts.timeout_s * 1000);
+
+  const done = new Promise<{ exitCode: number; killed: boolean; timedOut: boolean }>((resolve) => {
+    child = spawn(cmd, args, {
+      cwd: opts.cwd,
+      env: workloadEnv(),
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true, // own process group, so kills reach the whole tree
+    });
+    child.stdout?.on("data", (d) => opts.onOutput?.(String(d), "out"));
+    child.stderr?.on("data", (d) => opts.onOutput?.(String(d), "err"));
+    child.on("error", (e) => {
+      opts.onOutput?.(`workload spawn error: ${e.message}\n`, "err");
+      resolve({ exitCode: 127, killed, timedOut });
+    });
+    child.on("close", (code) => resolve({ exitCode: code ?? 1, killed, timedOut }));
+  });
+
+  return {
+    done: done.finally(() => clearTimeout(timer)),
+    kill: (reason) => {
+      if (reason === "cancel") killed = true;
+      else timedOut = true;
+      killGroup();
+    },
+  };
 }
 
 let busy = false;
@@ -184,8 +261,7 @@ async function executeJob(job: JobSpec): Promise<void> {
   busy = true;
   let checkoutDir = "";
   try {
-    const container = `ar-job-${NODE_ID}-${job.id}`.replace(/[^a-zA-Z0-9_.-]/g, "-");
-    console.log(`[${NODE_ID}] executing ${job.id} (${job.image})`);
+    console.log(`[${NODE_ID}] executing ${job.id}`);
     checkoutDir = checkout(job);
     const workspace = join(checkoutDir, job.workspace_subdir ?? "");
     if (!existsSync(workspace)) throw new Error(`workspace subdir missing: ${job.workspace_subdir}`);
@@ -198,28 +274,11 @@ async function executeJob(job: JobSpec): Promise<void> {
       console.log(`[${NODE_ID}] job ${job.id}: materialized input ${file.path}`);
     }
 
-    // Clear a stale same-named container (names are worker-unique; only a
-    // dead previous incarnation of this worker could own it).
-    sh("docker", ["rm", "-f", container]);
-    // Explicit pull so image fetch time is not billed to the job timeout.
-    const pull = sh("docker", ["pull", job.image], { timeout: 600_000 });
-    if (pull.code !== 0) console.log(`[${NODE_ID}] docker pull stderr: ${pull.stderr.slice(0, 300)}`);
+    console.log(`[${NODE_ID}] hosting workload as subprocess (declared stack image: ${job.image})`);
 
-    const hostCheckout = join(HOST_WORK_DIR, job.id);
-    // Mount the *workspace* (checkout + project subdir) as /workspace so job
-    // commands run at the project root (e.g. examples/demo-project).
-    const hostWorkspace = join(hostCheckout, job.workspace_subdir ?? "");
-    // Run job containers as the runner's uid by default so outputs remain
-    // owned (and cleanable) by the runner. Opt out with RUN_AS_HOST_USER=0
-    // for stacks that require root inside the container.
-    const uidGid = `${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`;
-    const userArgs = (process.env.RUN_AS_HOST_USER ?? "1") === "1" ? ["-u", uidGid] : [];
-    let containerProc: ReturnType<typeof spawn> | null = null;
-    let killed = false;
-
+    let handle: WorkloadHandle | null = null;
     const tailer = startProgressTail(job, workspace, () => {
-      killed = true;
-      if (containerProc) sh("docker", ["kill", container]);
+      handle?.kill("cancel");
     });
 
     // Lease renewal: silent jobs (no progress.jsonl output) must not lose their
@@ -231,33 +290,21 @@ async function executeJob(job: JobSpec): Promise<void> {
       }).catch(() => undefined);
     }, 10_000);
 
-    const timedOut = { value: false };
-    const timeoutTimer = setTimeout(() => {
-      timedOut.value = true;
-      sh("docker", ["kill", container]);
-    }, (job.timeout_s ?? 3600) * 1000);
-
     const started = Date.now();
-    const exitCode = await new Promise<number>((resolveExit) => {
-      containerProc = spawn("docker", [
-        "run", "--rm", "--name", container,
-        "-v", `${hostWorkspace}:/workspace`,
-        ...userArgs,
-        "-w", "/workspace",
-        job.image, ...job.command,
-      ]);
-      containerProc.stdout?.on("data", (d) => process.stdout.write(`[job ${job.id}] ${d}`));
-      containerProc.stderr?.on("data", (d) => process.stderr.write(`[job ${job.id}] ${d}`));
-      containerProc.on("error", (e) => { console.log(`[${NODE_ID}] docker spawn error: ${e.message}`); resolveExit(1); });
-      containerProc.on("close", (code) => resolveExit(code ?? 1));
+    handle = runWorkload({
+      command: job.command,
+      cwd: workspace,
+      timeout_s: job.timeout_s ?? 3600,
+      onOutput: (chunk, stream) =>
+        (stream === "out" ? process.stdout : process.stderr).write(`[job ${job.id}] ${chunk}`),
     });
-    clearTimeout(timeoutTimer);
+    const { exitCode, killed, timedOut } = await handle.done;
     tailer.stop();
     clearInterval(leaseTimer);
 
-    const state = killed || timedOut.value ? "failed" : exitCode === 0 ? "succeeded" : "failed";
+    const state = killed || timedOut ? "failed" : exitCode === 0 ? "succeeded" : "failed";
     const elapsed = Math.round((Date.now() - started) / 1000);
-    console.log(`[${NODE_ID}] job ${job.id} exited code=${exitCode} state=${state} in ${elapsed}s (killed=${killed} timeout=${timedOut.value})`);
+    console.log(`[${NODE_ID}] job ${job.id} exited code=${exitCode} state=${state} in ${elapsed}s (killed=${killed} timeout=${timedOut})`);
 
     // Let the final progress lines flush before collecting evidence.
     await new Promise((r) => setTimeout(r, 500));

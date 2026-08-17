@@ -3,6 +3,15 @@
 The contract every long-running job satisfies. **Stack-agnostic:** jobs never
 import framework code; the framework only standardizes the interface below.
 
+**Execution model (security):** workers host job workloads as **subprocesses
+inside the worker container** — no host docker socket, no sibling containers.
+A compromised workload is confined to the worker container and cannot reach
+the host. Consequently the `image` field is **advisory**: it declares the
+stack a job expects (e.g. `python:3.12-slim`); operators provision worker
+images with the runtimes they serve and advertise them via `NODE_TAGS`
+(e.g. `NODE_TAGS=python:3.12,cpu:8`), and job `requirements.tags` selects
+workers carrying the right runtime.
+
 ## 1. Job spec (submitted to the hub)
 
 ```jsonc

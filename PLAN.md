@@ -30,10 +30,10 @@ Tasklist derived from [DESIGN.md](DESIGN.md). Milestones are sequenced; tasks wi
 **Validation:** ✅ covered end-to-end by scripts/e2e-demo.mjs against the deployed stack (2 fake pullers = compose runner-a/runner-b).
 
 ## M3 — Worker runner
-- [x] Runner service (pull loop, execute container jobs, relay progress/events; multi-file progress.jsonl discovery)
+- [x] Runner service (pull loop, host job workloads as **subprocesses inside the worker container** — no host docker socket; detached process groups with SIGKILL-tree cancel/timeout; relay progress/events; multi-file progress.jsonl discovery)
 - [x] Worktree manager: clone/worktree strategies per activity; cleanup policy
 - [x] Compose worker profile (`worker-a`/`worker-b`), capability tags via env (`NODE_TAGS`)
-- [x] Resource quota hooks: GPU/memory reservations documented in compose; job containers run as runner uid
+- [x] Resource quota hooks: compose reservations documented; workload env is minimal with explicit `JOB_ENV_*` passthrough; `image` field is advisory stack metadata matched via tags
 
 **Validation:** ✅ two compose workers execute demo jobs; runner kill/requeue verified in E2E lease test (host dev run).
 

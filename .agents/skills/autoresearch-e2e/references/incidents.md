@@ -117,6 +117,25 @@ this file exists so the same debugging paths are never walked blind again).
   `repair` status.
 - Postgres for hub BDD needs `127.0.0.1:5432` published (compose has it).
 
+## 11. Docker socket removed — subprocess hosting (architecture change)
+
+- **Threat:** workers mounted `/var/run/docker.sock` to launch job containers.
+  The socket is root-equivalent on the host, and workers execute *untrusted*
+  research code (pulled dependencies, experiment scripts) — a compromised
+  worker/workload could escalate to full host control via the daemon.
+- **Change:** workers now host workloads as **subprocesses inside the worker
+  container** (detached process group, SIGKILL-tree on cancel/timeout, minimal
+  env + explicit `JOB_ENV_*` passthrough). The socket mount is gone from
+  compose; `docker.io` gone from the image.
+- **Consequences:** `image` became an **advisory stack declaration** (matched
+  via `NODE_TAGS` ↔ `requirements.tags`); worker images must carry the runtimes
+  they serve (demo needs `python3` + `python-is-python3`); incidents 3
+  (container-name collisions) and the uid-mapping cleanup lesson are
+  **obsolete by design**.
+- **Lesson:** never give code-execution services the host container socket;
+  confine them to their own container and treat stack requests as scheduling
+  metadata, not launch instructions.
+
 ## Verification recipes (copy-paste)
 
 ```bash

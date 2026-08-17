@@ -35,3 +35,15 @@ Feature: Worker runner behavior
     When a checkout is created for job "clone-1"
     Then the checkout contains "seed.txt"
     And the checkout is not the origin itself
+
+  Scenario: Workloads run as subprocesses inside the worker
+    Given a workspace containing progress.jsonl at "runs/x/progress.jsonl"
+    When a workload runs the command "sh -c 'echo hello > out.txt'"
+    Then the workload exit code is 0
+    And the workspace file "out.txt" contains "hello"
+
+  Scenario: Workload timeout kills the whole process group
+    When a workload runs the command "sh -c 'sleep 30'" with timeout 1 second
+    Then the workload was killed by timeout
+    And the workload exit code is nonzero
+    And the sleep subprocess is no longer running

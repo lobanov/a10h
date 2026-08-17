@@ -59,11 +59,9 @@ services:
       REPO_PATH: /repo
       CHECKOUT_STRATEGY: clone
       WORK_DIR: /work
-      HOST_WORK_DIR: ${PWD}/data/work-a
     volumes:
       - ${PWD}:/repo:ro
       - ./data/work-a:/work
-      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - hub
 
@@ -77,11 +75,9 @@ services:
       REPO_PATH: /repo
       CHECKOUT_STRATEGY: clone
       WORK_DIR: /work
-      HOST_WORK_DIR: ${PWD}/data/work-b
     volumes:
       - ${PWD}:/repo:ro
       - ./data/work-b:/work
-      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - hub
 
