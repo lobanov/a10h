@@ -213,7 +213,16 @@ export async function offerJobToSession(
   const job = full.rows[0];
   // R6: the secretary authors the work handoff (operational specifics the
   // worker needs; director supplies commander's intent, never the reverse).
-  const handoff = handoffFor(job);
+  // m8: carry the graph's title/expected_outcome as the intent payload.
+  let activityRow: { title?: string; expected_outcome?: string } | null = null;
+  try {
+    const ar = await pool.query(
+      `SELECT title, expected_outcome FROM activities WHERE plan_id = $1 AND id = $2`,
+      [(job as { plan_id?: string }).plan_id ?? "", (job as { activity?: string }).activity ?? ""],
+    );
+    activityRow = ar.rows[0] ?? null;
+  } catch { activityRow = null; }
+  const handoff = handoffFor(job, activityRow);
   void logSecretary("handoff", { job_id: jobId, session: sessionId, handoff });
   return emitInstruction(sessionId, "work_offer", { job, handoff });
 }

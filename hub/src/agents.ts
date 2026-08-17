@@ -1,11 +1,11 @@
 /**
- * Agent host (M5): auditor + director roles as pi SDK sessions with
- * purpose-built custom tools (record_audit / record_director_note).
+ * Agent host: secretary (gate verification) + director roles as pi SDK
+ * sessions with purpose-built custom tools (record_audit / record_director_note).
  *
  * Model access: a models.json is generated from env (Z_AI_API_KEY etc.) and
- * loaded via ModelRuntime. If no provider is configured, agents are disabled
- * and every trigger is logged to agent_log — mechanical gate results still
- * stand on their own (agents augment, never block).
+ * loaded via ModelRuntime. If no provider is configured, verification falls
+ * back to the mechanical verdict alone (agents augment, never block); failed
+ * turns retry with a cap, then fall back mechanically.
  */
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -234,7 +234,7 @@ export async function queueVerification(input: {
     }),
   );
   if (result) {
-    await pool.query(`UPDATE gate_results SET audit_note = $1 WHERE id = $2`, [
+    await pool.query(`UPDATE gate_results SET audit_note = $1, audit_retries = 0 WHERE id = $2`, [
       JSON.stringify(result),
       input.gateResultId,
     ]);
@@ -242,6 +242,55 @@ export async function queueVerification(input: {
       gate_result_id: input.gateResultId,
       activity: input.activity,
       verdict: result.verdict,
+    });
+    return;
+  }
+  // Agent turn failed (timeout / no tool call / model error). Bounded retry,
+  // then the documented mechanical fallback (agents augment, never block).
+  const bumped = await pool.query(
+    `UPDATE gate_results SET audit_retries = audit_retries + 1
+     WHERE id = $1 RETURNING audit_retries`,
+    [input.gateResultId],
+  );
+  const retries = (bumped.rows[0]?.audit_retries ?? 1) as number;
+  if (retries >= 3) {
+    await pool.query(`UPDATE gate_results SET audit_note = $1 WHERE id = $2`, [
+      JSON.stringify({
+        verdict: "agree_pass",
+        note: `mechanical fallback after ${retries} failed verification turns (agents augment, never block)`,
+      }),
+      input.gateResultId,
+    ]);
+    await logAgent("secretary", "verification_mechanical_fallback", {
+      gate_result_id: input.gateResultId,
+      activity: input.activity,
+      retries,
+    });
+  }
+}
+
+/** M1 sweep: pass-verdict gate results whose audit never landed (turn lost,
+ * hub restart, model_not_found) are re-enqueued once stale; the retry cap in
+ * queueVerification eventually falls back mechanically. */
+export async function sweepStaleVerifications(): Promise<void> {
+  const stale = await pool.query(
+    `SELECT gr.id, gr.plan_id, gr.activity, gr.job_id
+     FROM gate_results gr
+     WHERE gr.verdict = 'pass' AND gr.audit_note IS NULL
+       AND gr.evaluated_sha IS NOT NULL
+       AND gr.created_at < now() - interval '120 seconds'
+       AND gr.audit_retries < 3
+     ORDER BY gr.id LIMIT 5`,
+  );
+  for (const row of stale.rows) {
+    await queueVerification({
+      gateResultId: row.id,
+      plan_id: row.plan_id,
+      activity: row.activity,
+      job_id: row.job_id,
+      verdict: "pass",
+      checks: [{ id: "sweep", ok: true, detail: "re-enqueued: audit never landed" }],
+      evidence: [],
     });
   }
 }

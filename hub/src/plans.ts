@@ -48,6 +48,9 @@ export function parseGraph(graphYaml: string): Graph {
     throw new PlanError("graph must be an object with an `activities` map");
   }
   for (const [id, act] of Object.entries(graph.activities)) {
+      if (!/^[A-Za-z0-9._-]+$/.test(id)) {
+        throw new PlanError(`invalid activity id "${id}" (allowed: letters, digits, . _ -)`);
+      }
     if (!act.job || !Array.isArray(act.job.command) || act.job.command.length === 0) {
       throw new PlanError(`activity "${id}" must define job.command (non-empty array)`);
     }
@@ -97,6 +100,9 @@ export async function submitPlan(input: {
       [planId, input.name, graph.goal_ref ?? null, input.repoSubdir ?? null, input.repo ?? "demo", JSON.stringify(graph)],
     );
     for (const [id, act] of Object.entries(graph.activities)) {
+      if (!/^[A-Za-z0-9._-]+$/.test(id)) {
+        throw new PlanError(`invalid activity id "${id}" (allowed: letters, digits, . _ -)`);
+      }
       await client.query(
         `INSERT INTO activities (plan_id, id, title, depends_on, job, gate, expected_outcome, status)
          VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')`,

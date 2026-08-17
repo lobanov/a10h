@@ -188,3 +188,6 @@ ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS commit_sha TEXT;
 -- R5: the SHA a gate result was verified against — merges land EXACTLY the
 -- verified tip; a rebased tip re-enters verification before merging.
 ALTER TABLE gate_results ADD COLUMN IF NOT EXISTS evaluated_sha TEXT;
+
+-- R6 review: bounded verification-turn retries (mechanical fallback at 3).
+ALTER TABLE gate_results ADD COLUMN IF NOT EXISTS audit_retries INT NOT NULL DEFAULT 0;

@@ -35,16 +35,22 @@ export interface HandoffDetails {
   constraints: string[];
 }
 
-/** Deterministic work handoff for a promoted job (secretary-authored). */
-export function handoffFor(job: {
-  branch?: string | null;
-  base_sha?: string | null;
-  outputs?: { evidence?: string[]; artifacts?: string[] } | null;
-}): HandoffDetails {
+/** Deterministic work handoff for a promoted job (secretary-authored). The
+ * intent string carries the graph's title/expected outcome (the director's
+ * commander's intent); everything else is operational. */
+export function handoffFor(
+  job: {
+    branch?: string | null;
+    base_sha?: string | null;
+    outputs?: { evidence?: string[]; artifacts?: string[] } | null;
+  },
+  activity?: { title?: string; expected_outcome?: string } | null,
+): HandoffDetails {
+  const intentBits = [activity?.title, activity?.expected_outcome].filter(Boolean).join(" — ");
   return {
     role: "secretary",
     skill: "skills/secretary/SKILL.md",
-    intent: "Execute the assigned activity; evidence before claims.",
+    intent: intentBits || "Execute the assigned activity; evidence before claims.",
     branch: job.branch ?? "",
     base_sha: job.base_sha ?? "",
     artifact_paths: {

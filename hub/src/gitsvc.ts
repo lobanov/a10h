@@ -266,9 +266,13 @@ export async function createTaskBranch(
 
 /** Task ref for an activity, scoped to its plan revision. */
 export function taskRef(planId: string, activity: string): string {
-  // Ref names may not contain some chars; sanitize the plan id.
   const safe = planId.replace(/[^A-Za-z0-9._-]/g, "-");
-  return `refs/tasks/${safe}/${activity}`;
+  return `refs/tasks/${safe}/${sanitizeId(activity)}`;
+}
+
+/** Ids land in ref names and filesystem paths — charset-validate everywhere. */
+export function sanitizeId(id: string): string {
+  return id.replace(/[^A-Za-z0-9._-]/g, "-");
 }
 
 export interface LandingResult {
@@ -279,7 +283,7 @@ export interface LandingResult {
   instruction?: { id: number; target_main_sha: string; fresh: boolean };
 }
 
-const LANDING_STALL_S = Number(process.env.LANDING_STALL_TIMEOUT_S ?? 120);
+const landingStallS = (): number => Number(process.env.LANDING_STALL_TIMEOUT_S ?? 120);
 
 /**
  * Landing turn (serialized per repo): ff-merge the task branch into main; if
@@ -344,11 +348,11 @@ export async function landBranch(
     // the instruction; a fresh grant + instruction is issued each turn).
     await pool.query(`UPDATE rebase_instructions SET status = 'done', updated_at = now()
       WHERE repo = $1 AND branch = $2 AND status = 'held' AND created_at < now() - ($3 || ' seconds')::interval`,
-      [repo, branch, String(LANDING_STALL_S)]).catch(() => undefined);
+      [repo, branch, String(landingStallS())]).catch(() => undefined);
     const existing = await pool.query(
       `SELECT * FROM rebase_instructions WHERE repo=$1 AND branch=$2 AND status='held'
        AND updated_at > now() - ($3 || ' seconds')::interval ORDER BY id DESC LIMIT 1`,
-      [repo, branch, String(LANDING_STALL_S)],
+      [repo, branch, String(landingStallS())],
     );
     if ((existing.rowCount ?? 0) > 0) {
       const ins = existing.rows[0];
@@ -506,6 +510,8 @@ export async function hubRebase(
     const gitDir = repoDir(repo);
     const wt = mkdtempSync(join(tmpdir(), "hub-rebase-"));
     try {
+      const baseTip = sh0("git", ["--git-dir", gitDir, "rev-parse", "--verify", "--quiet", branch]).stdout.trim();
+      if (!baseTip) return { ok: false, detail: "branch missing" };
       let r = sh0("git", ["clone", "-q", "--no-hardlinks", gitDir, wt]);
       if (r.code !== 0) return { ok: false, detail: "clone failed" };
       r = sh0("git", ["fetch", "-q", "origin", branch], { cwd: wt });
@@ -518,10 +524,10 @@ export async function hubRebase(
         return { ok: false, detail: "conflict" };
       }
       const sha = sh0("git", ["rev-parse", "HEAD"], { cwd: wt }).stdout.trim();
-      const f = sh0("git", ["--git-dir", gitDir, "fetch", "-q", wt, "HEAD"]);
-      if (f.code !== 0) return { ok: false, detail: "fetch back failed" };
-      const u = sh0("git", ["--git-dir", gitDir, "update-ref", branch, sha]);
-      if (u.code !== 0) return { ok: false, detail: "update-ref failed" };
+      // CAS: refuse if the branch moved while we rebased (a worker push in
+      // the grace window must never be overwritten — retry next tick instead).
+      const cas = sh0("git", ["--git-dir", gitDir, "update-ref", branch, sha, baseTip]);
+      if (cas.code !== 0) return { ok: false, detail: "branch moved during rebase (cas)" };
       bus.publish("git", { kind: "hub_rebase", repo, branch, sha });
       return { ok: true, sha };
     } finally {

@@ -1,7 +1,7 @@
 import { pool } from "./db.ts";
 import { bus } from "./bus.ts";
 import { evaluateCriteria, type Criterion, type EvidenceFile } from "./gates.ts";
-import { queueVerification, queueDirector, agentConfig } from "./agents.ts";
+import { queueVerification, queueDirector, agentConfig, sweepStaleVerifications } from "./agents.ts";
 import { handoffFor, commitAttemptNote, logSecretary } from "./secretary.ts";
 import {
   createTaskBranch,
@@ -79,6 +79,7 @@ async function tickInner(): Promise<void> {
   await phase("requeueExpiredLeases", requeueExpiredLeases);
   await phase("promoteReadyActivities", promoteReadyActivities);
   await phase("offerQueuedJobs", offerQueuedJobs);
+  await phase("sweepStaleVerifications", sweepStaleVerifications);
   await phase("evaluateTerminalGates", evaluateTerminalGates);
   await phase("landVerifiedActivities", landVerifiedActivities);
   await phase("finalizePlans", finalizePlans);
@@ -213,6 +214,21 @@ async function promoteReadyActivities(): Promise<void> {
   }
 }
 
+const noteFailures = new Map<string, number>();
+function noteFailureBudget(jobId: string): number {
+  const used = noteFailures.get(jobId) ?? 0;
+  noteFailures.set(jobId, used + 1);
+  return 5 - used; // bounded retries, then a single stalled event
+}
+
+async function attemptOf(planId: string, activity: string): Promise<number> {
+  const r = await pool.query(
+    `SELECT attempt FROM activities WHERE plan_id = $1 AND id = $2`,
+    [planId, activity],
+  );
+  return (r.rows[0]?.attempt ?? 1) as number;
+}
+
 /** Audit-note verdict: true (agree_pass), false (dispute/agree_fail on a
  * passing gate), null (pending/unparseable). */
 function auditNoteAgrees(note: unknown): boolean | null {
@@ -241,7 +257,9 @@ async function maybeEmitRebaseInstruction(
   const result = await landBranch(repo, planId, activity, jobId ?? undefined);
   if (result.outcome !== "held_rebase") return;
   const rounds = await pool.query(
-    `SELECT count(*) c FROM rebase_instructions WHERE repo = $1 AND branch = $2`,
+    `SELECT count(*) c FROM rebase_instructions
+     WHERE repo = $1 AND branch = $2 AND status = 'held'
+       AND updated_at > now() - interval '30 minutes'`,
     [repo, branch],
   );
   if ((rounds.rows[0]?.c ?? 0) > MAX_REBASE_ROUNDS) {
@@ -650,12 +668,28 @@ async function landVerifiedActivities(): Promise<void> {
       const node = jobRow.rows[0]?.node as string | undefined;
       const session = node ? await sessionForNode(node) : null;
       if (result.outcome === "merged" || result.outcome === "nothing_to_merge") {
-        if (session) {
-          await emitInstruction(session, "exit", {
-            reason: "post_merge",
-            activity: row.activity,
-            plan_id: row.plan_id,
-          });
+        // m1: the attempt note lands BEFORE the worker is released (skill
+        // duty 5: merge AND note, then exit).
+        const note = await commitAttemptNote({
+          repo,
+          planId: row.plan_id,
+          activity: row.activity,
+          attempt: await attemptOf(row.plan_id, row.activity),
+          outcome: "merged",
+          branch,
+          tip,
+        });
+        if (note.committed) {
+          await pool.query(
+            `INSERT INTO artifacts (job_id, kind, path, commit_sha) VALUES ($1, 'note', $2, $3)`,
+            [row.job_id, note.note_path, note.main],
+          ).catch(() => undefined);
+        }
+        if (session && (await emitInstruction(session, "exit", {
+          reason: "post_merge",
+          activity: row.activity,
+          plan_id: row.plan_id,
+        })) !== null) {
           await setSessionState(session, "exited");
         }
       } else if (
@@ -674,30 +708,39 @@ async function landVerifiedActivities(): Promise<void> {
       console.error(`[scheduler] landing ${key} failed:`, (e as Error).message);
     }
   }
-  // R6 secretary retention: a summary note on main for every closed attempt
-  // (merged or failed/resolved), once per attempt. Notes go through the
-  // serialized per-repo writer (fetch + ff update-ref — no transport hooks).
+  // R6 secretary retention: a summary note on main for every closed FAILED
+  // attempt (merged attempts note inside the landing path, before the exit).
+  // M4: notes are deferred while the repo has pending landings (each note
+  // moves main and would churn verified branches into rebases — batch them
+  // into quiescent windows).
   {
+    const pendingLandings = await pool.query(
+      `SELECT DISTINCT p.repo FROM activities a JOIN plans p ON p.id = a.plan_id
+       WHERE a.status = 'passed' AND a.merged_sha IS NULL`,
+    );
+    const busyRepos = new Set(pendingLandings.rows.map((r) => r.repo ?? "demo"));
     const closed = await pool.query(
-      `SELECT a.plan_id, a.id AS activity, a.attempt, a.job_id, a.merged_sha, p.repo, a.status
+      `SELECT a.plan_id, a.id AS activity, a.attempt, a.job_id, p.repo, a.status
        FROM activities a JOIN plans p ON p.id = a.plan_id
-       WHERE a.status IN ('passed','resolved','failed_final','escalated')
-         AND NOT EXISTS (
-           SELECT 1 FROM artifacts n
-           WHERE n.job_id = a.job_id AND n.kind = 'note' AND n.path LIKE 'notes/%'
-         )`,
+       WHERE a.status IN ('resolved','failed_final','escalated')`,
     );
     for (const row of closed.rows) {
-      const merged = row.merged_sha !== null;
-      if (row.status === "passed" && !merged) continue; // note waits for the merge
+      const repo = row.repo ?? "demo";
+      if (busyRepos.has(repo)) continue; // quiescent-window batching
       const branch = taskRefOf(row.plan_id, row.activity);
-      const tip = await gitRevParse(row.repo ?? "demo", branch);
+      const tip = await gitRevParse(repo, branch);
+      // M6: authoritative dedup — the note path on main is the marker.
+      const existing = await pool.query(
+        `SELECT 1 FROM artifacts WHERE job_id = $1 AND kind = 'note' LIMIT 1`,
+        [row.job_id],
+      );
+      if ((existing.rowCount ?? 0) > 0) continue;
       const note = await commitAttemptNote({
-        repo: row.repo ?? "demo",
+        repo,
         planId: row.plan_id,
         activity: row.activity,
         attempt: row.attempt,
-        outcome: merged ? "merged" : (row.status as "failed_final" | "resolved" | "escalated"),
+        outcome: row.status as "failed_final" | "resolved" | "escalated",
         branch,
         tip,
         detail: `activity ${row.status}`,
@@ -707,6 +750,8 @@ async function landVerifiedActivities(): Promise<void> {
           `INSERT INTO artifacts (job_id, kind, path, commit_sha) VALUES ($1, 'note', $2, $3)`,
           [row.job_id, note.note_path, note.main],
         ).catch(() => undefined);
+      } else if (noteFailureBudget(row.job_id) <= 0) {
+        await logSecretary("note_stalled", { job_id: row.job_id, activity: row.activity });
       }
     }
   }
