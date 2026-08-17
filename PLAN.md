@@ -86,16 +86,16 @@ Source: DESIGN.md v1.1 (§3.2.1 git plane, §3.3 state model, §3.4 skills, §4 
 ### R1 — Gitserver + internal CA + worker tokens
 - [ ] `gitserver` service in hub compose: nginx + git-http-backend (fcgiwrap), bare repos on `data/repos/*.git`, smart HTTP over TLS
 - [ ] `hf-mount` sidecar in hub compose (NFS backend): mounts the project HF Bucket read-write; the single `HF_TOKEN` stays hub-side — workers get filesystem access, no tokens
-- [ ] Bootstrap script: generate internal CA + gitserver server cert; create bare repos; issue worker git tokens **and an operator token** (main-write class); write hub-maintained policy map (job → allowed ref → token)
+- [ ] Bootstrap script: generate internal CA + gitserver server cert; create bare repos; issue worker git tokens; wire each project repo's **GitHub remote** (deploy key/PAT in hub `.env`) for upstream sync; write hub-maintained policy map (job → allowed ref → token)
 - [ ] CA cert + token distribution to workers (compose secrets/env); `http.sslCAInfo` wired in worker git config
 - [ ] Hub HTTP API served under the same internal CA (worker→hub registration/status/acks ride TLS, not just git)
 - [ ] Hub-side git read access (supervisor reads bare repos directly for gates/secretary)
 
-**Acceptance:** from a worker container, `git clone https://<token>@gitserver/demo.git` succeeds with CA trust; unauthenticated clone fails; TLS errors absent; a worker container writes and reads back a file through the hf-mount bucket path with **no HF token present**; operator-token push to `main` succeeds while worker-token push to `main` is denied. Bootstrap is idempotent (re-run safe).
+**Acceptance:** from a worker container, `git clone https://<token>@gitserver/demo.git` succeeds with CA trust; unauthenticated clone fails; TLS errors absent; a worker container writes and reads back a file through the hf-mount bucket path with **no HF token present**; hub-side repo fetches its GitHub remote and fast-forwards `main` through the serialized writer (operator changes reach the hub), while a worker-token push to `main` is denied. Bootstrap is idempotent (re-run safe).
 
 ### R2 — Task branches + pre-receive policy
 - [ ] Scheduler creates `refs/tasks/<activity>` at current main tip on promotion; job spec carries `{branch, base_sha}`
-- [ ] Hub-generated pre-receive hook enforces: ref-match + token-match + fast-forward; denies pushes to any other ref incl. main (one exception: the **operator token** may push `main` — human/director write path, ff-only); the hook is thin — it calls a supervisor API that validates pushes and **atomically consumes** one-time authorizations (re-grant on failed push); ref deletions and tag pushes denied outright
+- [ ] Hub-generated pre-receive hook enforces: ref-match + token-match + fast-forward; denies pushes to any other ref incl. main (the operator write path flows through the GitHub remote + hub sync, never direct gitserver pushes); the hook is thin — it calls a supervisor API that validates pushes and **atomically consumes** one-time authorizations (re-grant on failed push); ref deletions and tag pushes denied outright
 - [ ] One-time rebase/force authorization records (granted by hub, consumed by hook)
 - [ ] Lease-expiry requeue appends on the same branch (no reset)
 - [ ] Serialized per-repo landing queue in scheduler (ff-merge when descendant; non-ff branches are **held** — rebase-instruction delivery arrives with R4; a stalled branch is skipped after a timeout rather than head-of-line blocking)
@@ -143,7 +143,7 @@ Source: DESIGN.md v1.1 (§3.2.1 git plane, §3.3 state model, §3.4 skills, §4 
 - [ ] Lineage index maintenance (git ↔ HF pointers)
 - [ ] Role-shaping skill authored framework-side (`skills/secretary/`)
 
-**Acceptance (integration + e2e):** work_offer events carry secretary-authored operational details; the secretary performs gate verification (formal criteria only — no unsolicited adversarial review, by design); every completed/failed attempt yields a note commit on main referencing the branch; the secretary never decides research direction (skill constraint test).
+**Acceptance (integration + e2e):** work_offer events carry secretary-authored operational details; the secretary performs gate verification (formal criteria only — adversarial research review is not a secretary duty); every completed/failed attempt yields a note commit on main referencing the branch; the secretary never decides research direction (skill constraint test).
 
 ### R7 — Demo seeding + validation rework
 - [ ] Bootstrap seeds `data/repos/demo.git` from `examples/demo-project`; framework repo no longer mounted to workers
