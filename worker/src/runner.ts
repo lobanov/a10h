@@ -1,5 +1,5 @@
 import { spawn, execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -28,7 +28,7 @@ const WORK_DIR = resolve(process.env.WORK_DIR ?? "/work");
 const POLL_MS = 1_000;
 const HEARTBEAT_MS = 10_000;
 
-interface JobSpec {
+export interface JobSpec {
   id: string;
   image: string;
   command: string[];
@@ -41,6 +41,7 @@ interface JobSpec {
   repo?: string;
   branch?: string;
   base_sha?: string;
+  activity?: string;
 }
 
 export function parseTags(spec: string): Record<string, string | number | boolean> {
@@ -70,6 +71,14 @@ function sh(cmd: string, args: string[], opts: { cwd?: string; timeout?: number 
   } catch (e: any) {
     return { code: e.status ?? 1, stdout: e.stdout ?? "", stderr: e.stderr ?? e.message };
   }
+}
+
+/** Cap file content at `max` bytes WITHOUT cutting mid-line (artifacts are
+ * line-oriented JSON; a mid-JSON cut produces invalid collected files). */
+function capAtLineBoundary(content: string, max: number): string {
+  if (content.length <= max) return content;
+  const cut = content.lastIndexOf("\n", max);
+  return content.slice(0, cut > 0 ? cut : max);
 }
 
 /** Minimal, explicit environment for job subprocesses (never the worker's own env). */
@@ -224,6 +233,22 @@ export function findProgressFiles(workspace: string): string[] {
 export function startProgressTail(job: JobSpec, workspace: string, onCancel: () => void): Tailer {
   // Jobs may emit progress.jsonl anywhere under the workspace (e.g. runs/<variant>/);
   // the runner discovers and tails all of them (protocols/README.md §2).
+  // ONLY files the workload itself creates/modified: the checkout carries
+  // COMMITTED progress files from earlier attempts (attempts append on the
+  // same branch) — re-pumping those floods the hub and starves the terminal
+  // status POST behind the fetch pool (root cause of the R4 wedge).
+  // Baseline snapshot taken BEFORE the workload starts: the checkout carries
+  // COMMITTED progress files from earlier attempts (git checkout gives them
+  // fresh mtimes, so mtime cannot distinguish). Only content beyond the
+  // baseline — new files or growth — belongs to this workload.
+  const baseline = new Map<string, number>();
+  for (const file of findProgressFiles(workspace)) {
+    try {
+      baseline.set(file, statSync(file).size);
+    } catch {
+      baseline.set(file, 0);
+    }
+  }
   const offsets = new Map<string, number>();
   let cancelled = false;
   const sendLine = async (line: string) => {
@@ -248,6 +273,12 @@ export function startProgressTail(job: JobSpec, workspace: string, onCancel: () 
       content = readFileSync(file, "utf8");
     } catch {
       return;
+    }
+    // Committed baseline content is not this job's progress.
+    const base = baseline.get(file);
+    if (base !== undefined) {
+      if (content.length <= base) return;
+      content = content.slice(base);
     }
     const offset = offsets.get(file) ?? 0;
     if (content.length <= offset) return;
@@ -284,18 +315,18 @@ async function collectAndUpload(job: JobSpec, workspace: string): Promise<void> 
   };
   for (const rel of job.outputs?.evidence ?? []) {
     const p = join(workspace, rel);
-    if (existsSync(p)) body.evidence.push({ path: rel, content: readFileSync(p, "utf8").slice(0, 256 * 1024) });
+    if (existsSync(p)) body.evidence.push({ path: rel, content: capAtLineBoundary(readFileSync(p, "utf8"), 256 * 1024) });
     else console.log(`[${NODE_ID}] job ${job.id}: evidence file missing: ${rel}`);
   }
   for (const rel of job.outputs?.artifacts ?? []) {
     const p = join(workspace, rel);
-    if (existsSync(p)) body.artifacts.push({ path: rel, content: readFileSync(p, "utf8").slice(0, 256 * 1024) });
+    if (existsSync(p)) body.artifacts.push({ path: rel, content: capAtLineBoundary(readFileSync(p, "utf8"), 256 * 1024) });
   }
   const res = await hub(`/api/jobs/${job.id}/result`, { method: "POST", body: JSON.stringify(body) });
   if (!res.ok) console.log(`[${NODE_ID}] result upload failed: ${res.status}`);
 }
 
-async function executeJob(job: JobSpec): Promise<void> {
+export async function executeJob(job: JobSpec): Promise<void> {
   busy = true;
   let checkoutDir = "";
   try {
@@ -351,11 +382,16 @@ async function executeJob(job: JobSpec): Promise<void> {
     // dead work on failures stays visible for audit — attempts append).
     const push = commitAndPush(job, checkoutDir);
     console.log(`[${NODE_ID}] job ${job.id}: task-branch push ${push.detail}`);
+    console.log(`[${NODE_ID}] job ${job.id}: collecting evidence...`);
     await collectAndUpload(job, workspace);
-    await hub(`/api/jobs/${job.id}/status`, {
+    console.log(`[${NODE_ID}] job ${job.id}: evidence collected; posting terminal status...`);
+    const statusRes = await hub(`/api/jobs/${job.id}/status`, {
       method: "POST",
       body: JSON.stringify({ state, exit_code: exitCode, attempt: job.attempt }),
     });
+    if (!statusRes.ok) {
+      console.log(`[${NODE_ID}] job ${job.id}: terminal status POST rejected (${statusRes.status}) — attempt superseded`);
+    }
   } finally {
     // Checkout lives exactly as long as the task (exit-after-task makes the
     // container ephemeral; nothing durable lives only in the worker).
@@ -408,4 +444,26 @@ if (isEntrypoint) {
     console.error(`[${NODE_ID}] fatal:`, e);
     process.exit(1);
   });
+}
+
+/** R4: fetch + rebase the task branch onto the instructed main and force-push
+ * (the hook consumes the hub-granted one-time authorization server-side).
+ */
+export function rebaseOntoMain(opts: {
+  dir: string;
+  repo: string;
+  branch: string;
+  targetMainSha: string;
+}): { ok: boolean; detail: string } {
+  let r = sh("git", ["fetch", "--quiet", "origin", "main"], { cwd: opts.dir });
+  if (r.code !== 0) return { ok: false, detail: `fetch main failed: ${r.stderr.slice(0, 300)}` };
+  r = sh("git", ["rebase", "--onto", opts.targetMainSha, "HEAD"], { cwd: opts.dir });
+  if (r.code !== 0) {
+    sh("git", ["rebase", "--abort"], { cwd: opts.dir });
+    return { ok: false, detail: `rebase failed (conflict): ${r.stderr.slice(0, 300)}` };
+  }
+  sh("git", ["remote", "set-url", "origin", originUrl(opts.repo)], { cwd: opts.dir });
+  r = sh("git", ["push", "--quiet", "--force", "origin", `HEAD:${opts.branch}`], { cwd: opts.dir });
+  if (r.code !== 0) return { ok: false, detail: `push failed: ${r.stderr.slice(0, 300)}` };
+  return { ok: true, detail: "rebased and force-pushed" };
 }

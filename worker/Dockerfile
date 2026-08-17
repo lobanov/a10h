@@ -18,4 +18,4 @@ RUN npm install --omit=dev && rm -rf ~/.npm
 COPY tsconfig.json ./
 COPY src ./src
 
-CMD ["npx", "tsx", "src/runner.ts"]
+CMD ["npx", "tsx", "src/worker.ts"]

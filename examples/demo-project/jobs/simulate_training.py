@@ -29,7 +29,10 @@ VARIANTS = {
 
 
 def emit(out_dir, event):
-    with open(os.path.join(out_dir, "progress.jsonl"), "a") as f:
+    # Fresh stream per run: a run's progress.jsonl describes THAT run (a
+    # repair/rerun must not concatenate onto the committed attempt history —
+    # attempts append on the same task branch, so appending grows unboundedly).
+    with open(os.path.join(out_dir, "progress.jsonl"), "w") as f:
         f.write(json.dumps(event) + "\n")
 
 

@@ -6,6 +6,10 @@ import { dirname, join } from "node:path";
 const _dirname = dirname(fileURLToPath(import.meta.url));
 
 export const pool = new pg.Pool({
+  // Bound every query: a wedged statement must not hang the scheduler
+  // (status POSTs await tick()) or exhaust the pool.
+  statement_timeout: 10_000,
+  query_timeout: 15_000,
   host: process.env.PGHOST ?? "localhost",
   port: Number(process.env.PGPORT ?? 5432),
   user: process.env.PGUSER ?? "autoresearch",

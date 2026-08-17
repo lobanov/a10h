@@ -140,3 +140,35 @@ CREATE TABLE IF NOT EXISTS rebase_instructions(
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- R4: worker sessions (uniform-until-registered identity; one per container
+-- lifetime) and the instruction outbox (bounded per session, at-least-once
+-- delivery with idempotent acks; fresh buffer per SSE connect).
+CREATE TABLE IF NOT EXISTS worker_sessions(
+  id TEXT PRIMARY KEY,
+  node_id TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'idle',        -- idle|busy|exited
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_seen TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS worker_sessions_node_idx ON worker_sessions(node_id);
+
+CREATE TABLE IF NOT EXISTS instruction_outbox(
+  id SERIAL PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES worker_sessions(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,                        -- work_offer|gate_feedback|retrospective_prompt|repair|rebase|cancel|exit|custom
+  payload JSONB NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  delivered_at TIMESTAMPTZ,
+  acked_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS instruction_outbox_session_idx ON instruction_outbox(session_id, acked_at);
+
+-- R4: one-shot exit signaling (attempt closure); prevents re-killing a
+-- node's future sessions for long-closed activities.
+ALTER TABLE activities ADD COLUMN IF NOT EXISTS exit_signaled_at TIMESTAMPTZ;
+
+-- R4: live-connection tracking — a session is offerable only while its SSE
+-- stream is actually connected (zombie sessions from dead containers are
+-- excluded immediately, not after the 90s freshness window).
+ALTER TABLE worker_sessions ADD COLUMN IF NOT EXISTS streaming BOOLEAN NOT NULL DEFAULT false;

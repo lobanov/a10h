@@ -254,7 +254,7 @@ export interface LandingResult {
   branch: string;
   outcome: "merged" | "held_rebase" | "nothing_to_merge";
   main?: string;
-  instruction?: { id: number; target_main_sha: string };
+  instruction?: { id: number; target_main_sha: string; fresh: boolean };
 }
 
 const LANDING_STALL_S = Number(process.env.LANDING_STALL_TIMEOUT_S ?? 600);
@@ -313,7 +313,7 @@ export async function landBranch(
       return {
         repo, branch, outcome: "held_rebase",
         main: mainSha,
-        instruction: { id: ins.id as number, target_main_sha: ins.target_main_sha },
+        instruction: { id: ins.id as number, target_main_sha: ins.target_main_sha, fresh: false },
       };
     }
     await grantForceAuth(repo, branch, jobId ?? null);
@@ -325,7 +325,11 @@ export async function landBranch(
     bus.publish("git", { kind: "rebase_required", repo, branch, target_main_sha: mainSha });
     return {
       repo, branch, outcome: "held_rebase", main: mainSha,
-      instruction: { id: ins.rows[0].id as number, target_main_sha: ins.rows[0].target_main_sha },
+      instruction: {
+        id: ins.rows[0].id as number,
+        target_main_sha: ins.rows[0].target_main_sha,
+        fresh: true,
+      },
     };
   });
 }
@@ -352,7 +356,8 @@ function git(
     execFile(
       "git",
       ["--git-dir", gitDir, ...args],
-      { maxBuffer: 64 * 1024 * 1024, env: { ...process.env, ...extraEnv } },
+      // Bounded: a wedged git must not poison the per-repo lock chain forever.
+      { maxBuffer: 64 * 1024 * 1024, timeout: 60_000, env: { ...process.env, ...extraEnv } },
       (err, stdout, stderr) => (err ? reject(new Error(String(err.message || err))) : resolve({ stdout: String(stdout), stderr: String(stderr) })),
     );
   });

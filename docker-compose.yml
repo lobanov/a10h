@@ -75,6 +75,7 @@ services:
   worker-a:
     build: ./worker
     profiles: ["worker"]
+    restart: always
     environment:
       HUB_URL: https://hub:8080
       NODE_EXTRA_CA_CERTS: /data/git/ca/ca.crt
@@ -97,6 +98,7 @@ services:
   worker-b:
     build: ./worker
     profiles: ["worker"]
+    restart: always
     environment:
       HUB_URL: https://hub:8080
       NODE_EXTRA_CA_CERTS: /data/git/ca/ca.crt

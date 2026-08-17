@@ -3,6 +3,13 @@ import { bus } from "./bus.ts";
 import { evaluateCriteria, type Criterion, type EvidenceFile } from "./gates.ts";
 import { queueAudit, queueDirector } from "./agents.ts";
 import { createTaskBranch, landBranch } from "./gitsvc.ts";
+import {
+  offerJobToSession,
+  idleSessionsForJob,
+  sessionForNode,
+  emitInstruction,
+  setSessionState,
+} from "./sessions.ts";
 
 /**
  * Scheduler: runs every tick.
@@ -19,12 +26,60 @@ const MAX_GATE_ATTEMPTS = 2; // attempts per activity before escalation
 const rand = () => Math.random().toString(36).slice(2, 6);
 
 export async function tick(): Promise<void> {
-  await pruneStaleNodes();
-  await requeueExpiredLeases();
-  await promoteReadyActivities();
-  await evaluateTerminalGates();
-  await landVerifiedActivities();
-  await finalizePlans();
+  const t0 = Date.now();
+  const phase = async (name: string, fn: () => Promise<void>) => {
+    const start = Date.now();
+    const watchdog = setTimeout(() => {
+      console.log(`[scheduler] WEDGED phase ${name} (${Date.now() - start}ms) — active handles:`);
+      for (const h of (process as any)._getActiveHandles?.() ?? []) {
+        const desc =
+          h.constructor?.name ??
+          String(h);
+        const extra =
+          typeof h.spawnfile === "string"
+            ? ` spawnfile=${h.spawnfile} ${JSON.stringify(h.spawnargs ?? [])}`
+            : typeof h.address === "function" && h.address
+              ? ` ${JSON.stringify(h.address())}`
+              : "";
+        console.log(`  - ${desc}${extra}`);
+      }
+    }, 10_000) as ReturnType<typeof setTimeout>;
+    try {
+      await fn();
+      if (Date.now() - start > 3000) console.log(`[scheduler] SLOW phase ${name}: ${Date.now() - start}ms`);
+    } finally {
+      clearTimeout(watchdog);
+    }
+  };
+  await phase("pruneStaleNodes", pruneStaleNodes);
+  await phase("requeueExpiredLeases", requeueExpiredLeases);
+  await phase("promoteReadyActivities", promoteReadyActivities);
+  await phase("offerQueuedJobs", offerQueuedJobs);
+  await phase("evaluateTerminalGates", evaluateTerminalGates);
+  await phase("landVerifiedActivities", landVerifiedActivities);
+  await phase("finalizePlans", finalizePlans);
+  if (Date.now() - t0 > 5000) console.log(`[scheduler] SLOW tick: ${Date.now() - t0}ms`);
+}
+
+/**
+ * Register-then-offer (R4): queued jobs are offered to idle registered
+ * sessions over their SSE instruction streams — replacing the work-pull
+ * loop (GET /api/work stays as a demoted bootstrap/fallback path).
+ */
+async function offerQueuedJobs(): Promise<void> {
+  const jobs = await pool.query(
+    `SELECT * FROM jobs WHERE status = 'queued' ORDER BY created_at ASC LIMIT 50`,
+  );
+  for (const job of jobs.rows) {
+    const candidates = await idleSessionsForJob(
+      job.requirements as Record<string, unknown>,
+    );
+    if (candidates.length === 0) continue;
+    const offered = await offerJobToSession(job.id, candidates[0].session_id);
+    if (offered !== null) {
+      bus.publish("job_status", { job_id: job.id, status: "offered", session: candidates[0].session_id });
+    }
+  }
 }
 
 /** Remove nodes whose heartbeats stopped (stale registrations from redeployments). */
@@ -38,15 +93,42 @@ async function pruneStaleNodes(): Promise<void> {
 }
 
 async function requeueExpiredLeases(): Promise<void> {
+  // Offers to dead sessions revert to queued (not an attempt failure).
+  const expiredOffers = await pool.query(
+    `UPDATE jobs SET status = 'queued', node = NULL, updated_at = now()
+     WHERE status = 'offered' AND updated_at < now() - interval '30 seconds'
+     RETURNING id, node`,
+  );
+  for (const row of expiredOffers.rows) {
+    if (row.node) {
+      await pool.query(
+        `UPDATE worker_sessions SET state = 'idle' WHERE node_id = $1 AND state = 'busy'`,
+        [row.node],
+      );
+    }
+  }
+  for (const row of expiredOffers.rows) {
+    bus.publish("job_status", { job_id: row.id, status: "queued", reason: "offer_expired" });
+  }
   const expired = await pool.query(
     `UPDATE jobs SET status = 'queued', node = NULL, lease_expires = NULL,
        attempt = attempt + 1, updated_at = now()
      WHERE status IN ('leased', 'running')
        AND lease_expires < now()
        AND attempt < $1
-     RETURNING id, plan_id, activity, attempt`,
+     RETURNING id, plan_id, activity, attempt, node`,
     [MAX_JOB_ATTEMPTS],
   );
+  // The worker generation that held these jobs is gone (no rescue): release
+  // its stuck-busy sessions so the node's next generation can take offers.
+  for (const row of expired.rows) {
+    if (row.node) {
+      await pool.query(
+        `UPDATE worker_sessions SET state = 'idle' WHERE node_id = $1 AND state = 'busy'`,
+        [row.node],
+      );
+    }
+  }
   for (const row of expired.rows) {
     bus.publish("job_status", { job_id: row.id, status: "queued", requeued: true, attempt: row.attempt });
   }
@@ -228,6 +310,26 @@ export async function runGateEvaluation(job: {
       [job.plan_id, job.activity],
     );
     bus.publish("activity", { plan_id: job.plan_id, activity: job.activity, status: "passed", attempt: act.attempt });
+    // R4: retrospective prompt as an instruction (canned until the secretary
+    // owns it in R6) — the worker's agent consumes it as a turn input.
+    const jobRow = await pool.query(`SELECT node FROM jobs WHERE id = $1`, [job.id]);
+    const node = jobRow.rows[0]?.node as string | undefined;
+    if (node) {
+      const session = await sessionForNode(node);
+      if (session) {
+        await emitInstruction(session, "retrospective_prompt", {
+          job_id: job.id,
+          activity: job.activity,
+          plan_id: job.plan_id,
+          template: [
+            "# Worker retrospective — <activity>",
+            "- What worked: <thing that sped you up or avoided a failure>",
+            "- What was fragile: <thing that almost broke or wasted time>",
+            "- Lesson proposed: <concrete change to a skill, plan pattern, or job template>",
+          ].join("\n"),
+        });
+      }
+    }
   } else {
     if (act.attempt < MAX_GATE_ATTEMPTS) {
       await pool.query(
@@ -241,6 +343,23 @@ export async function runGateEvaluation(job: {
         attempt: act.attempt,
         reason: "gate_failed_retry_scheduled",
       });
+      // R4: gate feedback as an instruction — the worker's agent consumes the
+      // findings as the turn input for its repair iteration.
+      const jobRow = await pool.query(`SELECT node FROM jobs WHERE id = $1`, [job.id]);
+      const node = jobRow.rows[0]?.node as string | undefined;
+      if (node) {
+        const session = await sessionForNode(node);
+        if (session) {
+          await emitInstruction(session, "gate_feedback", {
+            job_id: job.id,
+            activity: job.activity,
+            plan_id: job.plan_id,
+            verdict,
+            failed_checks: checks.filter((c) => !c.ok),
+            reason,
+          });
+        }
+      }
     } else {
       await createEscalation(job.plan_id, job.activity, act.attempt, checks, reason);
     }
@@ -314,14 +433,17 @@ export async function resolveEscalation(approvalId: number, disposition: "accept
 }
 
 /**
- * R2 landing queue: activities whose gate PASSED and whose agent audit note
+ * R2/R4 landing queue: activities whose gate PASSED and whose agent audit note
  * exists (verified-complete) merge to main through the serialized per-repo
  * writer. Non-ff branches are held with a rebase instruction + one-time
- * force grant (delivered via SSE in R4; re-issued after the stall timeout).
+ * force grant, DELIVERED to the owning worker's session over SSE (R4; it
+ * fetches, rebases onto target main, force-pushes with the grant, and the
+ * next landing turn re-verifies). Merged/closed attempts emit the worker
+ * EXIT signal (workers stay operational through their task's full cycle).
  */
 async function landVerifiedActivities(): Promise<void> {
   const rows = await pool.query(
-    `SELECT a.plan_id, a.id AS activity, a.job_id, p.repo
+    `SELECT a.plan_id, a.id AS activity, a.job_id, p.repo, a.merged_sha
      FROM activities a
      JOIN plans p ON p.id = a.plan_id
      JOIN gate_results gr ON gr.plan_id = a.plan_id AND gr.activity = a.id
@@ -341,8 +463,75 @@ async function landVerifiedActivities(): Promise<void> {
         status: result.outcome === "merged" ? "landed" : "landing_held",
         landing: result,
       });
+      const jobRow = await pool.query(`SELECT node FROM jobs WHERE id = $1`, [row.job_id]);
+      const node = jobRow.rows[0]?.node as string | undefined;
+      const session = node ? await sessionForNode(node) : null;
+      if (result.outcome === "merged" || result.outcome === "nothing_to_merge") {
+        if (session) {
+          await emitInstruction(session, "exit", {
+            reason: "post_merge",
+            activity: row.activity,
+            plan_id: row.plan_id,
+          });
+          await setSessionState(session, "exited");
+        }
+      } else if (
+        result.outcome === "held_rebase" &&
+        result.instruction?.fresh && // emit once per stall window, not every tick
+        session
+      ) {
+        await emitInstruction(session, "rebase", {
+          repo,
+          branch: result.branch,
+          target_main_sha: result.instruction.target_main_sha,
+          job_id: row.job_id,
+        });
+      }
     } catch (e) {
       console.error(`[scheduler] landing ${key} failed:`, (e as Error).message);
+    }
+  }
+  // Generation release sweeper: a live busy session whose node has NO work
+  // pending (no offered/leased/running jobs) and served its task will never
+  // receive another instruction for this container generation — release it
+  // (exit + restart makes the node available as a fresh generation). This
+  // self-heals every post-task case: post-merge, attempt closure, retries
+  // executed by a newer generation, one-shot exits already consumed.
+  const releasable = await pool.query(
+    `SELECT DISTINCT s.id, s.node_id FROM worker_sessions s
+     WHERE s.state = 'busy' AND s.streaming
+       AND NOT EXISTS (
+         SELECT 1 FROM jobs j
+         WHERE j.node = s.node_id AND j.status IN ('offered', 'leased', 'running')
+       )`,
+  );
+  for (const row of releasable.rows) {
+    await emitInstruction(row.id, "exit", { reason: "no_pending_work", node: row.node_id });
+    await setSessionState(row.id, "exited");
+    bus.publish("worker_session", { session_id: row.id, node: row.node_id, state: "released" });
+  }
+
+  // Attempt-closure exits: failed_final/resolved activities release their
+  // worker — ONCE per activity (exit_signaled_at), never to future sessions.
+  const closed = await pool.query(
+    `SELECT a.plan_id, a.id AS activity, a.job_id FROM activities a
+     WHERE a.status IN ('resolved', 'failed_final') AND a.exit_signaled_at IS NULL`,
+  );
+  for (const row of closed.rows) {
+    const jobRow = await pool.query(`SELECT node FROM jobs WHERE id = $1`, [row.job_id]);
+    const node = jobRow.rows[0]?.node as string | undefined;
+    const session = node ? await sessionForNode(node) : null;
+    await pool.query(
+      `UPDATE activities SET exit_signaled_at = now() WHERE plan_id = $1 AND id = $2 AND exit_signaled_at IS NULL`,
+      [row.plan_id, row.activity],
+    );
+    if (session) {
+      await emitInstruction(session, "exit", {
+        reason: "attempt_closed",
+        activity: row.activity,
+        plan_id: row.plan_id,
+      });
+      await setSessionState(session, "exited");
     }
   }
 }

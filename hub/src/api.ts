@@ -8,6 +8,15 @@ import { bus } from "./bus.ts";
 import { submitPlan, approvePlan, PlanError } from "./plans.ts";
 import { tick, LEASE_TTL_S, nodeMatches, resolveEscalation } from "./scheduler.ts";
 import { authenticateGit, preReceivePolicyFull, syncUpstream, landBranch, loadPolicy } from "./gitsvc.ts";
+import {
+  registerWorker,
+  pendingInstructions,
+  markDelivered,
+  ackInstruction,
+  touchSession,
+  acceptOffer,
+  setStreaming,
+} from "./sessions.ts";
 
 /**
  * Hub HTTP API (DESIGN.md §3.2, §4). Pull-only hub-workers: workers call
@@ -411,6 +420,119 @@ export function createHttpServer(): ReturnType<typeof createHttpServerRaw> {
         const result = await syncUpstream(body.repo);
         bus.publish("git", { kind: "upstream_sync", repo: body.repo, ...result });
         return json(res, 200, result);
+      }
+
+      // ---------- worker sessions + SSE instructions (R4, §7.1) ----------
+      if (route === "POST /api/nodes/register") {
+        const body = JSON.parse((await readBody(req)).toString("utf8")) as {
+          node_id?: string;
+          tags?: Record<string, unknown>;
+        };
+        if (!body.node_id) return json(res, 400, { error: "node_id required" });
+        const reg = await registerWorker({ node_id: body.node_id, tags: body.tags });
+        return json(res, 201, reg);
+      }
+
+      {
+        const m = url.pathname.match(/^\/api\/workers\/([\w-]+)\/turns$/);
+        if (req.method === "POST" && m) {
+          // Worker agent-turn observability (R4): instruction turn inputs/outputs.
+          const body = JSON.parse((await readBody(req)).toString("utf8")) as Record<string, unknown>;
+          await pool.query(`INSERT INTO agent_log (role, event, data) VALUES ($1, 'instruction_turn', $2)`, [
+            `worker:${m[1].slice(0, 8)}`,
+            JSON.stringify(body),
+          ]);
+          bus.publish("agent", { role: `worker:${m[1].slice(0, 8)}`, event: "instruction_turn", data: body });
+          return json(res, 200, { ok: true });
+        }
+      }
+
+      {
+        const m = url.pathname.match(/^\/api\/jobs\/([^/]+)\/spec$/);
+        if (req.method === "GET" && m) {
+          const r = await pool.query(`SELECT * FROM jobs WHERE id = $1`, [m[1]]);
+          if ((r.rowCount ?? 0) === 0) return json(res, 404, { error: "no such job" });
+          return json(res, 200, r.rows[0]);
+        }
+      }
+
+      if (url.pathname.startsWith("/api/worker-sessions/") && url.pathname.endsWith("/events")) {
+        const sessionId = url.pathname.split("/")[3] ?? "";
+        if (!(await touchSession(sessionId))) return json(res, 404, { error: "unknown session" });
+        await setStreaming(sessionId, true);
+        res.writeHead(200, {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+          connection: "keep-alive",
+        });
+        res.write(`event: hello\ndata: ${JSON.stringify({ session_id: sessionId })}\n\n`);
+        // Fresh buffer on every connect: deliver ALL unacked instructions
+        // (at-least-once), then live updates as they are queued.
+        const deliver = async (instructions: Array<{ id: number; kind: string; payload: unknown }>) => {
+          if (instructions.length === 0) return;
+          await markDelivered(instructions.map((i) => i.id));
+          for (const ins of instructions) {
+            res.write(`id: ${ins.id}\nevent: instruction\ndata: ${JSON.stringify({ id: ins.id, kind: ins.kind, payload: ins.payload })}\n\n`);
+          }
+        };
+        await deliver(await pendingInstructions(sessionId));
+        const unsubscribe = bus.subscribe((e) => {
+          if (e.event === "instruction") {
+            const ev = e.data as Record<string, unknown>;
+            if (ev.session_id === sessionId) {
+              void pendingInstructions(sessionId).then((all) => {
+                // deliver only the newly queued instruction (unacked)
+                void deliver(all.filter((i) => i.id === ev.instruction_id));
+              });
+            }
+          }
+        });
+        const keepalive = setInterval(() => {
+          // A vanished session (DB reset / expired) closes the stream so the
+          // worker re-registers instead of streaming into the void.
+          void touchSession(sessionId).then((alive) => {
+            if (!alive) {
+              clearInterval(keepalive);
+              unsubscribe();
+              res.end();
+            } else {
+              res.write(`: keepalive\n\n`);
+            }
+          });
+        }, 10_000);
+        const cleanup = () => {
+          clearInterval(keepalive);
+          unsubscribe();
+          void setStreaming(sessionId, false);
+        };
+        req.on("close", cleanup);
+        return;
+      }
+
+      if (url.pathname.startsWith("/api/worker-sessions/") && url.pathname.endsWith("/ack")) {
+        const sessionId = url.pathname.split("/")[3] ?? "";
+        const body = JSON.parse((await readBody(req)).toString("utf8")) as {
+          instruction_id?: number;
+          accept_offer?: { job_id: string };
+        };
+        if (!(await touchSession(sessionId))) return json(res, 404, { error: "unknown session" });
+        if (body.accept_offer?.job_id) {
+          const okAccept = await acceptOffer(body.accept_offer.job_id, sessionId, LEASE_TTL_S);
+          if (!okAccept) return json(res, 409, { error: "offer no longer valid" });
+        }
+        if (body.instruction_id !== undefined) {
+          await ackInstruction(sessionId, body.instruction_id);
+        }
+        // Return the CURRENT job spec on accept — the worker must execute
+        // against fresh state (attempt may have advanced since the offer).
+        let job: unknown = null;
+        if (body.accept_offer?.job_id) {
+          const fresh = await pool.query(`SELECT * FROM jobs WHERE id = $1`, [
+            body.accept_offer.job_id,
+          ]);
+          job = fresh.rows[0] ?? null;
+        }
+        return json(res, 200, { ok: true, job });
       }
 
       // ---------- static dashboard (M6) ----------
