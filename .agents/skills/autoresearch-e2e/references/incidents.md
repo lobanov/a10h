@@ -1,0 +1,136 @@
+# E2E incident log — root causes and proofs
+
+Narrative record of real incidents hit while bringing the deployed stack to
+green. Each entry: symptom → root cause → fix (all fixes are in the repo;
+this file exists so the same debugging paths are never walked blind again).
+
+## 1. Both workers wedged busy (the "stuck dashboard" incident)
+
+- **Symptom:** plan approved, one job `queued`, zero leases, both workers
+  `busy` forever; dashboard looked frozen.
+- **Root cause:** `executeJob` set `busy = true`, then called `checkout()`
+  *before* the `try` whose `finally` reset `busy`. A failing checkout (see #2)
+  threw past the finally — `busy` leaked true and the pull loop never ran
+  again, on both workers.
+- **Fix:** whole body wrapped in `try/finally { busy = false }`; checkout
+  inside. Lesson: **initialize-then-cleanup pairs must bracket the entire
+  critical section, including fallible setup.**
+
+## 2. Git "dubious ownership" on the mounted repo
+
+- **Symptom:** `git clone /repo …` failed inside workers with
+  `fatal: detected dubious ownership`.
+- **Root cause:** host repo (uid 1002) mounted into containers running as
+  root; git refuses. Attempted `-c safe.directory=*` — **git ignores that
+  flag from `-c` deliberately** (security: untrusted repo config must not be
+  able to whitelist itself).
+- **Fix:** `git config --global --add safe.directory '*'` baked into
+  `worker/Dockerfile`. Lesson: verify security-sensitive flags in the actual
+  runtime, not from memory.
+
+## 3. Container-name collision after lease requeue
+
+- **Symptom:** killed worker mid-job; hub correctly requeued; the second
+  worker's `docker run` failed instantly: `Conflict. The container name
+  "/autoresearch-job-lease-demo" is already in use` (the dead worker's job
+  container kept running — it was never the hub's to kill).
+- **Fix:** names are now worker-unique (`ar-job-<worker>-<job>`) plus a
+  best-effort `docker rm -f` of the worker's own stale name before run.
+- **Lesson:** names shared across independent actors are a liveness coupling;
+  namespace by owner.
+
+## 4. Silent job requeued while alive (lease semantics gap)
+
+- **Symptom:** `sleep 150` job: attempt 1 killed → attempt 2 leased by the
+  other worker and *running*, yet the hub requeued it to attempt 3 ~40 s in.
+- **Root cause (two bugs):** (a) leases renewed **only** on progress events —
+  silent jobs never renewed; (b) `/status` with `state:"running"` set
+  `lease_expires = NULL`, and `NULL` never expires… but also never renews
+  against tick logic cleanly. Race produced the requeue.
+- **Fix:** runner posts `running` + attempt every 10 s (lease renewal loop);
+  hub renews `lease_expires` on running; all runner posts carry `attempt`, and
+  the hub rejects stale-attempt writes with `409`.
+- **Proof (kill-test, reproduce anytime):** submit `sleep 150` job → confirm
+  lease → `docker kill` the leasing worker → watch
+  `running|1|A → (lease expiry ~30 s) → leased|2|B → running|2|B` (renewals
+  every 10 s) → `succeeded|2|B` at t+180 s. SSE shows `"requeued":true`.
+
+## 5. vLLM cannot serve unsloth GGUF (three distinct errors)
+
+- `OSError: … .gguf is not a valid JSON file` (speculators pre-step reads the
+  GGUF path as a transformers config),
+  `Unknown config format "gguf"` (`--config-format=gguf` doesn't exist),
+  `Cannot find any model weights` in dir mode (wants safetensors),
+  plus `AmbiguousGlobalPerLayerAttributeError` from transformers 5.x strictness.
+- **Conclusion:** vLLM ≥0.27 has no GGUF path at all. GGUF → llama.cpp.
+  `ghcr.io/ggml-org/llama.cpp:server-cuda` (arm64 manifest OK for GB10/DGX
+  Spark) loads the 15.8 GB UD-Q4_K_M in ~32 s, ~4 slots at 8192 ctx.
+- Also: the GGUF repo ships no tokenizer files; llama.cpp needs none.
+- **Lesson:** match quant-ecosystem to server (unsloth GGUF ⇒ llama.cpp).
+
+## 6. Compose string `command:` mangles quoted JSON
+
+- `--hf-overrides {"allow_global_per_layer_attribute_access":true}` survived
+  `docker compose config` validation but arrived at argparse without quotes →
+  `ValueError … cannot be converted to loads`. YAML `>`-folded strings pass
+  through shlex inside the image entrypoint.
+- **Fix:** list-form `command:` entries (`- "--flag={\"k\":true}"`). Use list
+  form for anything containing quotes/braces.
+
+## 7. Agents ran but never called their tools
+
+- **Symptom:** `agent_log: auditor no_tool_call` ×N; audit checks failed.
+- **Root cause:** `createAgentSession({ tools: [], customTools: [t] })` — an
+  empty `tools` allowlist excludes custom tools too (documented, but subtle).
+- **Fix:** `noTools: "builtin"` keeps customTools, drops built-ins.
+
+## 8. Six concurrent audits → all timed out
+
+- **Symptom:** every `turn_error: agent timeout` (120 s) though a single
+  probe audit completed in 24 s.
+- **Root cause:** 6 gates completed near-simultaneously → 6 parallel turns
+  against one provider (rate limits, queueing) → serialized latency
+  explosion.
+- **Fix:** per-role FIFO turn queues (`enqueue(role, …)`, 180 s timeout) in
+  `hub/src/agents.ts`; E2E waits extended to minutes. Auditor on the local
+  model serializes naturally and is the steady-state default
+  (director = GLM-5.3 only, per policy).
+
+## 9. Hub EADDRINUSE on restart (host dev)
+
+- `kill $(cat hub.pid)` left the real listener alive: `npm start` → npm →
+  npx → tsx → node chain; the PID captured was npm's.
+- **Fix pattern:** `pkill -f "tsx src/index.ts"` (match the leaf), verify
+  with `pgrep -fa`, then start. In compose this problem disappears
+  (`docker compose up -d --build hub`).
+
+## 10. BDD determinism lessons (cucumber)
+
+- Hub scenarios share one scratch DB → `After` hook truncates all mutable
+  tables, or jobs leak across scenarios (`'t-invalid' == 't-lease'`).
+- Gherkin splits `When I GET /api/health` on spaces → quote path args.
+- `{string} is true` collides with `{string} is {string}` → cucumber
+  "ambiguous" — phrase distinct step texts.
+- Assertion phrasing must target *stable* contracts: after a failed gate the
+  activity may already be re-promoted to `running` (attempt 2) by the time you
+  look — assert "failed verdict + second job exists", not a transient
+  `repair` status.
+- Postgres for hub BDD needs `127.0.0.1:5432` published (compose has it).
+
+## Verification recipes (copy-paste)
+
+```bash
+# stack health
+docker compose --profile worker --profile local-llm ps --format '{{.Name}} {{.Status}}'
+curl -s localhost:8080/api/health
+
+# governance state snapshot
+curl -s localhost:8080/api/state | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const s=JSON.parse(d);console.log(JSON.stringify({plans:s.plans,acts:s.activities,approvals:s.approvals.length,agents:s.agent_log.slice(0,3)},null,1))})"
+
+# live SSE capture (proof of event flow)
+curl -sN localhost:8080/api/stream > /tmp/sse.log &   # then: grep -c 'job_event' /tmp/sse.log
+
+# clean re-run
+docker exec autoresearch-postgres-1 psql -U autoresearch -d autoresearch -c "TRUNCATE nodes, jobs, job_events, artifacts, plans, activities, gate_results, approvals, agent_log;"
+nohup node scripts/e2e-demo.mjs http://localhost:8080 > /tmp/e2e.log 2>&1 &
+```
