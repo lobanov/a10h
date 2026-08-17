@@ -22,6 +22,7 @@ const ROOT = join(import.meta.dirname, "..");
 const CA = join(ROOT, "data/git/ca/ca.crt");
 const REPOS = join(ROOT, "data/repos");
 const HUB = process.env.HUB_URL ?? "https://localhost:8080";
+const INTERNAL = process.env.INTERNAL_TOKEN ?? "dev-internal";
 
 let passed = 0;
 let failed = 0;
@@ -145,6 +146,7 @@ console.log("== R1: upstream sync (operator write path) ==");
 
     const sync = JSON.parse(sh("curl", [
       "-s", "--cacert", CA, "-X", "POST", "-H", "content-type: application/json",
+      "-H", `authorization: Bearer ${INTERNAL}`,
       "-d", '{"repo":"demo"}', `${HUB}/internal/git/sync`,
     ]));
     ok("upstream sync fast-forwards main", sync.synced === true, JSON.stringify(sync));
@@ -157,6 +159,7 @@ console.log("== R1: upstream sync (operator write path) ==");
     // Re-sync is a no-op.
     const resync = JSON.parse(sh("curl", [
       "-s", "--cacert", CA, "-X", "POST", "-H", "content-type: application/json",
+      "-H", `authorization: Bearer ${INTERNAL}`,
       "-d", '{"repo":"demo"}', `${HUB}/internal/git/sync`,
     ]));
     ok("re-sync is a no-op", resync.synced === false, JSON.stringify(resync));

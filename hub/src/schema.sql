@@ -172,3 +172,7 @@ ALTER TABLE activities ADD COLUMN IF NOT EXISTS exit_signaled_at TIMESTAMPTZ;
 -- stream is actually connected (zombie sessions from dead containers are
 -- excluded immediately, not after the 90s freshness window).
 ALTER TABLE worker_sessions ADD COLUMN IF NOT EXISTS streaming BOOLEAN NOT NULL DEFAULT false;
+
+-- R4 review: bind each job offer to exactly one session (accept-time identity
+-- check; prevents double-execution via late acks).
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS offer_session TEXT;

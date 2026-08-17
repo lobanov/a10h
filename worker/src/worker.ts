@@ -27,6 +27,11 @@ import {
   type JobSpec,
 } from "./runner.ts";
 
+/** Never leak the git token (embedded in remote URLs) into logs/turns. */
+function redact(text: string): string {
+  return text.replace(/https:\/\/[^@/]+@/g, "https://***@");
+}
+
 export interface Instruction {
   id: number;
   kind: string;
@@ -120,10 +125,15 @@ export class WorkerAgent {
   }
 
   private async hub(path: string, init: RequestInit = {}): Promise<Response> {
-    return fetch(`${this.opts.hubUrl}${path}`, {
-      ...init,
-      headers: { "content-type": "application/json", ...(init.headers ?? {}) },
-    });
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      ...((init.headers as Record<string, string>) ?? {}),
+    };
+    // Hub API auth when the operator sets a token (same token as the
+    // dashboard — single-operator posture, DESIGN §7).
+    const token = process.env.AUTH_TOKEN ?? "";
+    if (token) headers.authorization = `Bearer ${token}`;
+    return fetch(`${this.opts.hubUrl}${path}`, { ...init, headers });
   }
 
   private async logTurn(kind: string, data: Record<string, unknown>): Promise<void> {
@@ -171,6 +181,18 @@ export class WorkerAgent {
       body: JSON.stringify(body),
     });
     if (!res.ok) console.log(`[${this.opts.nodeId}] ack ${instructionId} failed: ${res.status}`);
+  }
+
+  /** Refuse an offer AND tell the hub (revert job + release generation). */
+  private async refuseOfferAck(instructionId: number, jobId: string): Promise<void> {
+    const res = await this.hub(`/api/worker-sessions/${this.sessionId}/ack`, {
+      method: "POST",
+      body: JSON.stringify({ instruction_id: instructionId, refuse_offer: { job_id: jobId } }),
+    });
+    if (!res.ok) {
+      console.log(`[${this.opts.nodeId}] refusal for ${jobId} failed: ${res.status}`);
+      await this.ack(instructionId).catch(() => undefined);
+    }
   }
 
   /** Accept a work offer; returns the FRESH job spec on success. */
@@ -224,10 +246,10 @@ export class WorkerAgent {
         let job = instruction.payload.job as JobSpec;
         await this.consume(instruction);
         if (this.hasCompletedTask || this.exitPending) {
-          // One task per container: the offer expires hub-side (30s) and is
-          // re-offered to another generation. Ack to clear the buffer only.
+          // One task per container: tell the hub so it reverts the offer to
+          // queued AND releases this generation (exit + restart).
           console.log(`[${this.opts.nodeId}] refusing offer ${job.id} (task done / exit pending)`);
-          await this.ack(instruction.id);
+          await this.refuseOfferAck(instruction.id, job.id);
           break;
         }
         const accepted = await this.acceptOffer(instruction.id, job.id);
@@ -275,7 +297,7 @@ export class WorkerAgent {
         rmSync(dir, { recursive: true, force: true });
         const co = checkout({ id: `${job_id}-rebase`, repo, branch } as JobSpec);
         const r = rebaseOntoMain({ dir: co.dir, repo, branch, targetMainSha: target_main_sha });
-        console.log(`[${this.opts.nodeId}] rebase: ${r.detail}`);
+        console.log(`[${this.opts.nodeId}] rebase: ${redact(r.detail)}`);
         await this.logTurn("rebase_result", { job_id, ...r });
         rmSync(dir, { recursive: true, force: true });
         await this.ack(instruction.id);
@@ -367,7 +389,9 @@ export class WorkerAgent {
           console.log(
             `[${this.opts.nodeId}] instruction #${instruction.id} (${instruction.kind}) handler error: ${(e as Error).message}`,
           );
-          await this.ack(instruction.id).catch(() => undefined);
+          if (instruction.kind !== "rebase") {
+            await this.ack(instruction.id).catch(() => undefined);
+          }
         }
         if (this.exited) {
           onExit?.();

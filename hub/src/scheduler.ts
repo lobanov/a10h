@@ -175,15 +175,7 @@ async function promoteReadyActivities(): Promise<void> {
         return dep && ["passed", "resolved", "failed_final"].includes(dep.status);
       });
       if (!depsOk) continue;
-      const jobId = `${act.id}--a${act.attempt + 1}--${rand()}`;
-      // R2: pre-create the task branch at main's tip; the job spec carries
-      // {branch, base_sha}. Repair re-promotions reuse the existing ref
-      // (attempts append on the same branch).
-      const { branch, base_sha } = await createTaskBranch(repo, act.id);
-      // Cross-activity data flow: materialize upstream activities' evidence
-      // (e.g. training metrics.json) into this job's checkout pre-run.
-      // Transitive closure: analysis needs baseline metrics even though it
-      // only depends on variant-a/variant-b directly.
+      // Cross-activity evidence closure (transitive deps).
       const closure = new Set<string>();
       const collect = (id: string) => {
         for (const dep of (byId.get(id)?.depends_on as string[]) ?? []) {
@@ -208,43 +200,61 @@ async function promoteReadyActivities(): Promise<void> {
           }
         }
       }
-      await pool.query("BEGIN");
+      // M10 isolation: one failing promotion must not poison the tick's
+      // later phases (gates/landing/sweeper) for every other plan.
       try {
-        await pool.query(
-          `INSERT INTO jobs (id, plan_id, activity, image, command, requirements, outputs,
-                             inputs_evidence, workspace_subdir, timeout_s, status, attempt,
-                             repo, branch, base_sha)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'queued',$11,$12,$13,$14)`,
-          [
-            jobId,
-            plan.id,
-            act.id,
-            act.job.image,
-            JSON.stringify(act.job.command),
-            JSON.stringify(act.job.requirements ?? {}),
-            JSON.stringify(act.job.outputs ?? {}),
-            JSON.stringify(inputsEvidence),
-            plan.repo_subdir,
-            act.job.timeout_s ?? 3600,
-            act.attempt + 1,
-            repo,
-            branch,
-            base_sha,
-          ],
-        );
-        await pool.query(
-          `UPDATE activities SET status = 'running', attempt = $1, job_id = $2, updated_at = now()
-           WHERE plan_id = $3 AND id = $4`,
-          [act.attempt + 1, jobId, plan.id, act.id],
-        );
-        await pool.query(`UPDATE plans SET status = 'executing', updated_at = now() WHERE id = $1`, [plan.id]);
-        await pool.query("COMMIT");
-        bus.publish("job_status", { job_id: jobId, status: "queued", activity: act.id, plan_id: plan.id, attempt: act.attempt + 1 });
-        bus.publish("activity", { plan_id: plan.id, activity: act.id, status: "running", attempt: act.attempt + 1 });
-      } catch {
-        await pool.query("ROLLBACK");
+        await promoteOneActivity(repo, plan, act, inputsEvidence);
+      } catch (e) {
+        console.error(`[scheduler] promote ${plan.id}/${act.id} failed:`, (e as Error).message);
       }
     }
+  }
+}
+
+/** Promote one ready activity to a queued job (R2: pre-created task branch). */
+async function promoteOneActivity(
+  repo: string,
+  plan: { id: string; repo_subdir: string | null },
+  act: any,
+  inputsEvidence: Array<{ path: string; content: string }>,
+): Promise<void> {
+  const jobId = `${act.id}--a${act.attempt + 1}--${rand()}`;
+  const { branch, base_sha } = await createTaskBranch(repo, plan.id, act.id);
+  await pool.query("BEGIN");
+  try {
+    await pool.query(
+      `INSERT INTO jobs (id, plan_id, activity, image, command, requirements, outputs,
+                         inputs_evidence, workspace_subdir, timeout_s, status, attempt,
+                         repo, branch, base_sha)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'queued',$11,$12,$13,$14)`,
+      [
+        jobId,
+        plan.id,
+        act.id,
+        act.job.image,
+        JSON.stringify(act.job.command),
+        JSON.stringify(act.job.requirements ?? {}),
+        JSON.stringify(act.job.outputs ?? {}),
+        JSON.stringify(inputsEvidence),
+        plan.repo_subdir,
+        act.job.timeout_s ?? 3600,
+        act.attempt + 1,
+        repo,
+        branch,
+        base_sha,
+      ],
+    );
+    await pool.query(
+      `UPDATE activities SET status = 'running', attempt = $1, job_id = $2, updated_at = now()
+       WHERE plan_id = $3 AND id = $4`,
+      [act.attempt + 1, jobId, plan.id, act.id],
+    );
+    await pool.query(`UPDATE plans SET status = 'executing', updated_at = now() WHERE id = $1`, [plan.id]);
+    await pool.query("COMMIT");
+    bus.publish("job_status", { job_id: jobId, status: "queued", activity: act.id, plan_id: plan.id, attempt: act.attempt + 1 });
+    bus.publish("activity", { plan_id: plan.id, activity: act.id, status: "running", attempt: act.attempt + 1 });
+  } catch {
+    await pool.query("ROLLBACK");
   }
 }
 
@@ -446,8 +456,13 @@ async function landVerifiedActivities(): Promise<void> {
     `SELECT a.plan_id, a.id AS activity, a.job_id, p.repo, a.merged_sha
      FROM activities a
      JOIN plans p ON p.id = a.plan_id
-     JOIN gate_results gr ON gr.plan_id = a.plan_id AND gr.activity = a.id
-     WHERE a.status = 'passed' AND a.merged_sha IS NULL AND gr.audit_note IS NOT NULL`,
+     JOIN LATERAL (
+       SELECT verdict, audit_note FROM gate_results gr
+       WHERE gr.plan_id = a.plan_id AND gr.activity = a.id
+       ORDER BY gr.id DESC LIMIT 1
+     ) latest ON true
+     WHERE a.status = 'passed' AND a.merged_sha IS NULL
+       AND latest.verdict = 'pass' AND latest.audit_note IS NOT NULL`,
   );
   const seen = new Set<string>();
   for (const row of rows.rows) {

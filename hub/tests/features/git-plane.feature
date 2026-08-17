@@ -21,7 +21,7 @@ Feature: R2 task branches + pre-receive policy (git plane)
   Scenario: Push with a foreign node token is rejected when the job is leased
     Given the job is leased by node "worker-b"
     When node "worker-a" pushes a fast-forward commit to "refs/tasks/alpha"
-    Then the push is rejected with "leased by node"
+    Then the push is rejected with "held by node"
 
   Scenario: Fast-forward push by the leasing node is accepted
     Given the job is leased by node "worker-a"

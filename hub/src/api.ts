@@ -16,6 +16,8 @@ import {
   touchSession,
   acceptOffer,
   setStreaming,
+  sessionForNode,
+  emitInstruction,
 } from "./sessions.ts";
 
 /**
@@ -72,6 +74,15 @@ export function createHttpServer(): ReturnType<typeof createHttpServerRaw> {
       // exempt from the API bearer token. /internal/git/sync keeps it.
       const internalGit =
         url.pathname === "/internal/git/auth" || url.pathname === "/internal/git/pre-receive";
+      // land/sync advance main — require the compose-internal token.
+      const internalMutating =
+        url.pathname === "/internal/git/land" || url.pathname === "/internal/git/sync";
+      if (internalMutating && process.env.INTERNAL_TOKEN) {
+        const h = req.headers.authorization ?? "";
+        if (h !== `Bearer ${process.env.INTERNAL_TOKEN}`) {
+          return json(res, 401, { error: "internal token required" });
+        }
+      }
       if (!internalGit && !authorized(req, url)) {
         return json(res, 401, { error: "unauthorized" });
       }
@@ -228,6 +239,12 @@ export function createHttpServer(): ReturnType<typeof createHttpServerRaw> {
         if (err) return json(res, 400, { error: `invalid progress event: ${err}` });
         const job = await pool.query(`SELECT id, status, node FROM jobs WHERE id = $1`, [jobId]);
         if (job.rowCount === 0) return json(res, 404, { error: "job not found" });
+        // Ownership: only the leasing node's events renew/record (a stale
+        // generation must not keep the current attempt's lease alive).
+        const posterNode = (ev as { node?: string }).node;
+        if (job.rows[0].node && posterNode && posterNode !== job.rows[0].node) {
+          return json(res, 409, { error: "job leased by another node" });
+        }
         await pool.query(
           `INSERT INTO job_events (job_id, t, pct, eta_s, stage, metrics, state)
            VALUES ($1,$2,$3,$4,$5,$6,$7)`,
@@ -333,6 +350,10 @@ export function createHttpServer(): ReturnType<typeof createHttpServerRaw> {
           bus.publish("job_status", { job_id: jobId, status: "cancelled" });
         } else {
           await pool.query(`UPDATE jobs SET cancel_requested = true, updated_at = now() WHERE id = $1`, [jobId]);
+          if (job.rows[0].node) {
+            const sess = await sessionForNode(job.rows[0].node);
+            if (sess) await emitInstruction(sess, "cancel", { job_id: jobId });
+          }
           bus.publish("job_status", { job_id: jobId, status: job.rows[0].status, cancel_requested: true });
         }
         return json(res, 200, { ok: true });

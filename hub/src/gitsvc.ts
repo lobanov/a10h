@@ -158,10 +158,15 @@ export async function preReceivePolicyFull(
   let needForceGrant = false;
   for (const p of pushes) {
     const { ref, old: oldSha, new: newSha } = p;
-    // 2. ref-match: an active job bound to this exact branch
+    // 2. ref-match: an active job bound to this exact branch — or a job
+    // that went terminal within the follow-up grace window (retrospectives
+    // and other post-terminal pushes land on the same branch).
     const jobRow = await pool.query(
       `SELECT id, node, status FROM jobs
-       WHERE repo = $1 AND branch = $2 AND status IN ('queued','leased','running')
+       WHERE repo = $1 AND branch = $2
+         AND (status IN ('queued','leased','running')
+              OR (status IN ('succeeded','failed','cancelled')
+                  AND updated_at > now() - interval '30 minutes'))
        ORDER BY created_at DESC LIMIT 1`,
       [repo, ref],
     );
@@ -170,9 +175,10 @@ export async function preReceivePolicyFull(
       continue;
     }
     const job = jobRow.rows[0];
-    // 3. token-match: a leased/running job accepts pushes only from its node
-    if ((job.status === "leased" || job.status === "running") && job.node && job.node !== info.node) {
-      messages.push(`${ref} belongs to a job leased by node ${job.node}, not ${info.node}`);
+    // 3. token-match: any job bound to a node accepts pushes only from it
+    //    (leased/running work, and grace-window follow-ups alike).
+    if (job.node && job.node !== info.node) {
+      messages.push(`${ref} belongs to a job held by node ${job.node}, not ${info.node}`);
       continue;
     }
     // 4/5. fast-forward unless a one-time grant covers this push
@@ -228,13 +234,17 @@ export async function consumeForceAuth(repo: string, refs: string[]): Promise<bo
 
 /**
  * Pre-create the task branch for an activity at main's tip (promotion).
- * Re-promotion (repair/requeue) reuses the existing ref — attempts append.
+ * Refs are SCOPED to the plan (`refs/tasks/<plan>/<activity>`): activity ids
+ * repeat across plan revisions and re-runs (DESIGN §3.2.1 — refs scoped per
+ * graph revision); re-promotion within a plan reuses the ref (attempts
+ * append), and the base is ALWAYS current main for a fresh plan.
  */
 export async function createTaskBranch(
   repo: string,
+  planId: string,
   activity: string,
 ): Promise<{ branch: string; base_sha: string }> {
-  const branch = `refs/tasks/${activity}`;
+  const branch = taskRef(planId, activity);
   return withRepoLock(repo, async () => {
     const dir = repoDir(repo);
     const existing = await git(dir, ["rev-parse", "--verify", "--quiet", branch]).then(
@@ -247,6 +257,13 @@ export async function createTaskBranch(
     bus.publish("git", { kind: "branch_created", repo, branch, base_sha: mainSha });
     return { branch, base_sha: mainSha };
   });
+}
+
+/** Task ref for an activity, scoped to its plan revision. */
+export function taskRef(planId: string, activity: string): string {
+  // Ref names may not contain some chars; sanitize the plan id.
+  const safe = planId.replace(/[^A-Za-z0-9._-]/g, "-");
+  return `refs/tasks/${safe}/${activity}`;
 }
 
 export interface LandingResult {
@@ -271,7 +288,7 @@ export async function landBranch(
   activity: string,
   jobId?: string,
 ): Promise<LandingResult> {
-  const branch = `refs/tasks/${activity}`;
+  const branch = taskRef(planId ?? "adhoc", activity);
   return withRepoLock(repo, async () => {
     const dir = repoDir(repo);
     const tip = await git(dir, ["rev-parse", "--verify", "--quiet", branch]).then(

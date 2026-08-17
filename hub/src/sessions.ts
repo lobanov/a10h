@@ -203,7 +203,7 @@ export async function offerJobToSession(
 ): Promise<number | null> {
   const claimed = await pool.query(
     `UPDATE jobs SET status = 'offered', node = (SELECT node_id FROM worker_sessions WHERE id = $2),
-       updated_at = now()
+       offer_session = $2, updated_at = now()
      WHERE id = $1 AND status = 'queued' RETURNING id`,
     [jobId, sessionId],
   );
@@ -213,15 +213,33 @@ export async function offerJobToSession(
   return emitInstruction(sessionId, "work_offer", { job });
 }
 
-/** Worker acked a work_offer: bind the lease to its node (idempotent). */
+/** A session refused its offer (one-task-per-container generation is done):
+ * revert the job to queued and release the generation (exit + restart). */
+export async function refuseOffer(sessionId: string, jobId: string): Promise<void> {
+  await pool.query(
+    `UPDATE jobs SET status = 'queued', node = NULL, offer_session = NULL, updated_at = now()
+     WHERE id = $1 AND status = 'offered' AND offer_session = $2`,
+    [jobId, sessionId],
+  );
+  const node = await pool.query(`SELECT node_id FROM worker_sessions WHERE id = $1`, [sessionId]);
+  await emitInstruction(sessionId, "exit", {
+    reason: "generation_done",
+    node: node.rows[0]?.node_id,
+  });
+  await setSessionState(sessionId, "exited");
+}
+
+/** Worker acked a work_offer: bind the lease to its node. The accept is
+ * bound to the OFFERED session only (late/duplicate acks from other
+ * generations cannot steal or double-lease the job). */
 export async function acceptOffer(jobId: string, sessionId: string, leaseSeconds: number): Promise<boolean> {
   const node = await pool.query(`SELECT node_id FROM worker_sessions WHERE id = $1`, [sessionId]);
   if (node.rows.length === 0) return false;
   const lease = new Date(Date.now() + leaseSeconds * 1000);
   const r = await pool.query(
     `UPDATE jobs SET status = 'leased', node = $1, lease_expires = $2, updated_at = now()
-     WHERE id = $3 AND status IN ('offered', 'leased') RETURNING id`,
-    [node.rows[0].node_id, lease, jobId],
+     WHERE id = $3 AND status = 'offered' AND offer_session = $4 RETURNING id`,
+    [node.rows[0].node_id, lease, jobId, sessionId],
   );
   if ((r.rowCount ?? 0) > 0) {
     await setSessionState(sessionId, "busy");

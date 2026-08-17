@@ -46,6 +46,7 @@ services:
       # under the same internal CA as the gitserver.
       REPOS_DIR: /data/repos
       POLICY_PATH: /data/git/policy.json
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:-dev-internal}
       TLS_CERT_PATH: /data/git/tls/hub.crt
       TLS_KEY_PATH: /data/git/tls/hub.key
       HF_STORE_PATH: /hf-store
@@ -66,6 +67,8 @@ services:
     # scripts/bootstrap-git.sh to have generated data/git/{ca,tls} and seeded
     # data/repos/*.git.
     build: ./gitserver
+    environment:
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:-dev-internal}
     volumes:
       - ./data/repos:/data/repos
       - ./data/git:/data/git:ro
@@ -87,9 +90,14 @@ services:
       GIT_SSL_CAINFO: /data/git/ca/ca.crt
       GIT_TOKEN_FILE: /data/git/tokens/worker-a.token
       HF_STORE_PATH: /hf-store
+      # Hub API auth (single-operator token; same as the dashboard's).
+      AUTH_TOKEN: ${AUTH_TOKEN:-}
     volumes:
       - ./data/work-a:/work
-      - ./data/git:/data/git:ro
+      # Least privilege: only the CA cert + THIS node's git token (never the
+      # CA key, server keys, or other nodes' tokens).
+      - ./data/git/ca/ca.crt:/data/git/ca/ca.crt:ro
+      - ./data/git/tokens/worker-a.token:/data/git/tokens/worker-a.token:ro
       - ./data/hf-store:/hf-store
     depends_on:
       - hub
@@ -109,9 +117,11 @@ services:
       GIT_SSL_CAINFO: /data/git/ca/ca.crt
       GIT_TOKEN_FILE: /data/git/tokens/worker-b.token
       HF_STORE_PATH: /hf-store
+      AUTH_TOKEN: ${AUTH_TOKEN:-}
     volumes:
       - ./data/work-b:/work
-      - ./data/git:/data/git:ro
+      - ./data/git/ca/ca.crt:/data/git/ca/ca.crt:ro
+      - ./data/git/tokens/worker-b.token:/data/git/tokens/worker-b.token:ro
       - ./data/hf-store:/hf-store
     depends_on:
       - hub

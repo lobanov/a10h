@@ -254,6 +254,7 @@ export function startProgressTail(job: JobSpec, workspace: string, onCancel: () 
   const sendLine = async (line: string) => {
     try {
       const ev = JSON.parse(line);
+      if (!ev.node) ev.node = NODE_ID; // ownership: hub rejects foreign event posts
       const res = await hub(`/api/jobs/${job.id}/events`, { method: "POST", body: JSON.stringify(ev) });
       if (res.ok) {
         const body = (await res.json()) as { cancel?: boolean };
@@ -353,11 +354,22 @@ export async function executeJob(job: JobSpec): Promise<void> {
 
     // Lease renewal: silent jobs (no progress.jsonl output) must not lose their
     // lease while genuinely running. Renew every 10s until terminal.
+    // The renewal response carries the cancel flag — honor it so silent
+    // jobs are cancellable without waiting for the timeout.
     const leaseTimer = setInterval(() => {
       void hub(`/api/jobs/${job.id}/status`, {
         method: "POST",
         body: JSON.stringify({ state: "running", attempt: job.attempt }),
-      }).catch(() => undefined);
+      })
+        .then(async (res) => {
+          if (!res.ok) return;
+          const body = (await res.json()) as { cancel?: boolean };
+          if (body.cancel) {
+            console.log(`[${NODE_ID}] job ${job.id}: cancellation requested by hub (lease renewal)`);
+            handle?.kill("cancel");
+          }
+        })
+        .catch(() => undefined);
     }, 10_000);
 
     const started = Date.now();
@@ -457,13 +469,15 @@ export function rebaseOntoMain(opts: {
 }): { ok: boolean; detail: string } {
   let r = sh("git", ["fetch", "--quiet", "origin", "main"], { cwd: opts.dir });
   if (r.code !== 0) return { ok: false, detail: `fetch main failed: ${r.stderr.slice(0, 300)}` };
-  r = sh("git", ["rebase", "--onto", opts.targetMainSha, "HEAD"], { cwd: opts.dir });
+  // Rebase THIS branch's commits onto the instructed main (upstream=target);
+  // `--onto target HEAD` replays nothing and would DROP the task's work.
+  r = sh("git", ["rebase", opts.targetMainSha], { cwd: opts.dir });
   if (r.code !== 0) {
     sh("git", ["rebase", "--abort"], { cwd: opts.dir });
     return { ok: false, detail: `rebase failed (conflict): ${r.stderr.slice(0, 300)}` };
   }
   sh("git", ["remote", "set-url", "origin", originUrl(opts.repo)], { cwd: opts.dir });
   r = sh("git", ["push", "--quiet", "--force", "origin", `HEAD:${opts.branch}`], { cwd: opts.dir });
-  if (r.code !== 0) return { ok: false, detail: `push failed: ${r.stderr.slice(0, 300)}` };
+  if (r.code !== 0) return { ok: false, detail: `push failed: ${r.stderr.replace(/https:\/\/[^@/]+@/g, "https://***@").slice(0, 300)}` };
   return { ok: true, detail: "rebased and force-pushed" };
 }

@@ -305,6 +305,9 @@ When("a cyclic plan graph is submitted", async function () {
 
 // ---------- R2 git-plane steps (git-plane.feature) ----------
 
+/** Plan-scoped task ref (R2 review fix: refs/tasks/<plan>/<activity>). */
+const tref = (activity: string): string => `refs/tasks/${planName}/${activity}`;
+
 function bare(args: string[]): string {
   return execFileSync("git", ["--git-dir", join(reposDir, "demo.git"), ...args], {
     encoding: "utf8",
@@ -400,11 +403,13 @@ Given("the job is leased by node {string}", async function (node: string) {
   );
 });
 
-Given("the hub grants a one-time force authorization for {string}", async function (ref: string) {
+Given("the hub grants a one-time force authorization for {string}", async function (refArg: string) {
+  const ref = refArg.startsWith("refs/tasks/") && refArg.endsWith("/alpha") ? tref("alpha") : refArg;
   await hubMod.pool.query(`INSERT INTO git_force_auth (repo, ref) VALUES ('demo', $1)`, [ref]);
 });
 
-Given("the job is leased by node {string} and pushed a commit to {string}", async function (node: string, ref: string) {
+Given("the job is leased by node {string} and pushed a commit to {string}", async function (node: string, refArg: string) {
+  const ref = refArg.startsWith("refs/tasks/") && !refArg.includes("/", "refs/tasks/".length) ? tref(refArg.slice("refs/tasks/".length)) : refArg;
   await hubMod.pool.query(
     `UPDATE jobs SET status = 'leased', node = $1, lease_expires = now() + interval '5 minutes' WHERE id = $2`,
     [node, r2.jobId],
@@ -433,7 +438,7 @@ Given('activities "alpha" and "beta" both verified-complete with diverged branch
       `UPDATE jobs SET status = 'leased', node = 'worker-a', lease_expires = now() + interval '5 minutes' WHERE id = $1`,
       [j.id],
     );
-    const ref = `refs/tasks/${j.activity}`;
+    const ref = tref(j.activity as string);
     const sha = mkCommit(bare(["rev-parse", ref]), `work-${j.activity}`);
     bare(["update-ref", ref, sha]);
     await hubMod.pool.query(`UPDATE jobs SET status = 'succeeded' WHERE id = $1`, [j.id]);
@@ -445,27 +450,31 @@ Given('activities "alpha" and "beta" both verified-complete with diverged branch
   );
 });
 
-When('the hook is asked about a push of ref {string} from old {string} to a new commit', async function (ref: string, _seed: string) {
+When('the hook is asked about a push of ref {string} from old {string} to a new commit', async function (refArg: string, _seed: string) {
+  const ref = refArg.includes("/") && !refArg.startsWith("refs/") ? tref(refArg) : refArg;
   const old = bare(["rev-parse", "main"]);
   const sha = mkCommit(old, "probe");
   r2.last = await preReceive("worker-a", [{ old, new: sha, ref }]);
 });
 
-When('node {string} pushes a fast-forward commit to {string}', async function (node: string, ref: string) {
+When('node {string} pushes a fast-forward commit to {string}', async function (node: string, refArg: string) {
+  const ref = refArg.startsWith("refs/tasks/") && !refArg.includes("/", "refs/tasks/".length) ? tref(refArg.slice("refs/tasks/".length)) : refArg;
   const old = bare(["rev-parse", ref]);
   const sha = mkCommit(old, "ff");
   r2.last = await preReceive(node, [{ old, new: sha, ref }]);
   bare(["update-ref", ref, sha]);
 });
 
-When('node {string} pushes a non-fast-forward commit to {string}', async function (node: string, ref: string) {
+When('node {string} pushes a non-fast-forward commit to {string}', async function (node: string, refArg: string) {
+  const ref = refArg.startsWith("refs/tasks/") && !refArg.includes("/", "refs/tasks/".length) ? tref(refArg.slice("refs/tasks/".length)) : refArg;
   const old = bare(["rev-parse", ref]);
   const sha = mkNonFf(ref, "nff");
   r2.last = await preReceive(node, [{ old, new: sha, ref }]);
   if (r2.last.allow) bare(["update-ref", ref, sha]);
 });
 
-When('node {string} pushes the same non-fast-forward commit to {string} again', async function (node: string, ref: string) {
+When('node {string} pushes the same non-fast-forward commit to {string} again', async function (node: string, refArg: string) {
+  const ref = refArg.startsWith("refs/tasks/") && !refArg.includes("/", "refs/tasks/".length) ? tref(refArg.slice("refs/tasks/".length)) : refArg;
   const old = bare(["rev-parse", ref]);
   const sha = mkNonFf(ref, "nff-replay");
   r2.last = await preReceive(node, [{ old, new: sha, ref }]);
@@ -475,13 +484,15 @@ When("the scheduler lands verified activities", async function () {
   await hubMod.tick();
 });
 
-Then("the job carries branch {string} and base_sha equal to main", async function (branch: string) {
+Then("the job carries branch {string} and base_sha equal to main", async function (branchArg: string) {
+  const branch = branchArg.endsWith("/alpha") && branchArg.startsWith("refs/tasks/") ? tref("alpha") : branchArg;
   const row = await hubMod.pool.query(`SELECT branch, base_sha FROM jobs WHERE id = $1`, [r2.jobId]);
   assert.equal(row.rows[0].branch, branch);
   assert.equal(row.rows[0].base_sha, bare(["rev-parse", "main"]));
 });
 
-Then("the bare repo has ref {string} pointing at main", function (ref: string) {
+Then("the bare repo has ref {string} pointing at main", function (refArg: string) {
+  const ref = refArg.endsWith("/alpha") && refArg.startsWith("refs/tasks/") ? tref("alpha") : refArg;
   assert.equal(bare(["rev-parse", "--verify", ref]), bare(["rev-parse", "main"]));
 });
 
@@ -499,18 +510,19 @@ Then("the push is accepted", function () {
   assert.equal(r2.last!.allow, true, JSON.stringify(r2.last));
 });
 
-Then("main in the bare repo equals the {string} tip", function (ref: string) {
+Then("main in the bare repo equals the {string} tip", function (refArg: string) {
+  const ref = refArg.endsWith("/alpha") && refArg.startsWith("refs/tasks/") ? tref("alpha") : refArg;
   assert.equal(bare(["rev-parse", "main"]), bare(["rev-parse", ref]));
 });
 
 Then("main in the bare repo has advanced to exactly one branch tip", async function () {
   const main = bare(["rev-parse", "main"]);
-  const alphaTip = bare(["rev-parse", "refs/tasks/alpha"]);
-  const betaTip = bare(["rev-parse", "refs/tasks/beta"]);
+  const alphaTip = bare(["rev-parse", tref("alpha")]);
+  const betaTip = bare(["rev-parse", tref("beta")]);
   const landed = [alphaTip, betaTip].filter((t) => t === main);
   assert.equal(landed.length, 1, `main=${main} alpha=${alphaTip} beta=${betaTip}`);
   r2.landedTip = main;
-  r2.heldBranch = main === alphaTip ? "refs/tasks/beta" : "refs/tasks/alpha";
+  r2.heldBranch = main === alphaTip ? tref("beta") : tref("alpha");
 });
 
 Then("exactly one rebase instruction exists for the other branch", async function () {
