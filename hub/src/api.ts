@@ -126,12 +126,14 @@ export function createHttpServer(): ReturnType<typeof createHttpServerRaw> {
         const body = JSON.parse((await readBody(req)).toString("utf8")) as {
           name?: string;
           graph_yaml?: string;
+          repo?: string;
           repo_subdir?: string;
         };
         if (!body.name || !body.graph_yaml) return json(res, 400, { error: "name and graph_yaml required" });
         const { planId, approvalId } = await submitPlan({
           name: body.name,
           graphYaml: body.graph_yaml,
+          repo: body.repo,
           repoSubdir: body.repo_subdir,
         });
         return json(res, 201, { plan_id: planId, approval_id: approvalId });

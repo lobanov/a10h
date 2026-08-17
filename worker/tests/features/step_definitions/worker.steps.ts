@@ -170,34 +170,86 @@ Then("the cancellation callback was invoked", function () {
   assert.ok(cancelled, "onCancel was never called");
 });
 
-// ---------- checkout ----------
+// ---------- checkout (git plane, R3) ----------
 
-Given("a git origin repo containing {string}", function (_file: string) {
-  const origin = mkdtempSync(join(tmpRoot, "origin-"));
-  sh("git", ["init", "-q", "-b", "main"], { cwd: origin });
-  sh("git", ["-c", "user.name=bdd", "-c", "user.email=bdd@test", "add", "-A"], { cwd: origin });
-  writeFileSync(join(origin, "seed.txt"), "seed\n");
-  sh("git", ["add", "."], { cwd: origin });
-  sh("git", ["-c", "user.name=bdd", "-c", "user.email=bdd@test", "commit", "-q", "-m", "init"], { cwd: origin });
-  process.env.REPO_PATH = origin;
-  process.env.CHECKOUT_STRATEGY = "clone";
+Given("a gitserver origin repo containing {string}", function (_file: string) {
+  // Stand-in for the hub gitserver: a bare repo reachable as a local origin
+  // URL, seeded on main plus a task branch with branch-specific content.
+  const origin = join(tmpRoot, "gitserver-origin");
+  rmSync(origin, { recursive: true, force: true });
+  mkdirSync(origin, { recursive: true });
+  const wt = join(tmpRoot, "origin-wt");
+  rmSync(wt, { recursive: true, force: true });
+  mkdirSync(wt, { recursive: true });
+  sh("git", ["init", "-q", "-b", "main"], { cwd: wt });
+  writeFileSync(join(wt, "seed.txt"), "seed\n");
+  sh("git", ["add", "."], { cwd: wt });
+  sh("git", ["-c", "user.name=bdd", "-c", "user.email=bdd@test", "commit", "-q", "-m", "init"], { cwd: wt });
+  sh("git", ["clone", "-q", "--bare", wt, join(origin, "demo.git")], { cwd: wt });
+  // Task branch at main tip + one commit with branch-specific content.
+  writeFileSync(join(wt, "branch-only.txt"), "from task branch\n");
+  sh("git", ["add", "."], { cwd: wt });
+  sh("git", ["-c", "user.name=bdd", "-c", "user.email=bdd@test", "commit", "-q", "-m", "task"], { cwd: wt });
+  sh("git", ["push", "-q", join(origin, "demo.git"), `HEAD:refs/tasks/alpha`], { cwd: wt });
+  process.env.GITSERVER_URL = origin; // plain path origin (no token/CA needed)
+  delete process.env.GIT_TOKEN_FILE;
   this.origin = origin;
 });
 
-Given("REPO_PATH pointing at the origin and WORK_DIR pointing at an empty dir", function () {
+Given("WORK_DIR pointing at an empty dir", function () {
   process.env.WORK_DIR = mkdtempSync(join(tmpRoot, "work-"));
 });
 
-When("a checkout is created for job {string}", function (jobId: string) {
-  checkoutDir = runner.checkout({ id: jobId, image: "t", command: ["true"], requirements: {}, outputs: {}, timeout_s: 60 });
+When("a checkout is created for job {string} on task branch {string}", function (jobId: string, branch: string) {
+  const co = runner.checkout({
+    id: jobId, image: "t", command: ["true"], requirements: {}, outputs: {},
+    timeout_s: 60, repo: "demo", branch,
+  });
+  checkoutDir = co.dir;
 });
 
 Then("the checkout contains {string}", function (file: string) {
   assert.ok(existsSync(join(checkoutDir, file)), `${file} missing in ${checkoutDir}`);
 });
 
-Then("the checkout is not the origin itself", function () {
-  assert.notEqual(checkoutDir, this.origin);
+Then("the checkout does not contain {string}", function (file: string) {
+  assert.ok(!existsSync(join(checkoutDir, file)), `${file} unexpectedly present in ${checkoutDir}`);
+});
+
+Then("the checkout tracks content from the task branch", function () {
+  const head = sh("git", ["rev-parse", "HEAD"], { cwd: checkoutDir }).trim();
+  const fetched = sh("git", ["rev-parse", "FETCH_HEAD"], { cwd: checkoutDir }).trim();
+  const main = sh("git", ["rev-parse", "origin/main"], { cwd: checkoutDir }).trim();
+  assert.ok(
+    readFileSync(join(checkoutDir, "branch-only.txt"), "utf8").includes("task branch"),
+    "checkout is not at the task branch tip",
+  );
+  assert.equal(head, fetched, "HEAD is not the fetched task-branch tip");
+  assert.notEqual(head, main, "task branch tip equals main — fixture is wrong");
+});
+
+When("the job's work products are committed and pushed to the task branch", function () {
+  writeFileSync(join(checkoutDir, "result.txt"), "result\n");
+  const res = runner.commitAndPush({
+    id: "push-1", image: "t", command: ["true"], requirements: {}, outputs: {},
+    timeout_s: 60, repo: "demo", branch: "refs/tasks/alpha",
+  }, checkoutDir);
+  this.pushResult = res;
+});
+
+Then("the push succeeds and the origin branch advanced", function () {
+  assert.equal(this.pushResult.pushed, true, JSON.stringify(this.pushResult));
+  const origin = join(this.origin, "demo.git");
+  const tip = sh("git", ["--git-dir", origin, "rev-parse", "refs/tasks/alpha"]).trim();
+  const local = sh("git", ["rev-parse", "HEAD"], { cwd: checkoutDir }).trim();
+  assert.equal(tip, local);
+});
+
+Then("jobs without a task branch are rejected", function () {
+  assert.throws(
+    () => runner.checkout({ id: "nobranch", image: "t", command: ["true"], requirements: {}, outputs: {}, timeout_s: 60 }),
+    /no task branch/,
+  );
 });
 
 // ---------- workload subprocess hosting ----------

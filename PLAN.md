@@ -94,21 +94,21 @@ Source: DESIGN.md v1.1 (§3.2.1 git plane, §3.3 state model, §3.4 skills, §4 
 **Acceptance:** ✅ validated green — `node scripts/e2e-gitplane.mjs` (17 checks: bootstrap idempotent; TLS health; unauth clone fails; authed clone with CA; main-push denied; refs/tasks/* accepted; task ref in bare repo; hf-store write/read cross-worker, no HF token; upstream ff-sync + idempotent re-sync). Hub+worker BDD and `e2e-demo` stay green over TLS.
 
 ### R2 — Task branches + pre-receive policy
-- [ ] Scheduler creates `refs/tasks/<activity>` at current main tip on promotion; job spec carries `{branch, base_sha}`
-- [ ] Hub-generated pre-receive hook enforces: ref-match + token-match + fast-forward; denies pushes to any other ref incl. main (the operator write path flows through the GitHub remote + hub sync, never direct gitserver pushes); the hook is thin — it calls a supervisor API that validates pushes and **atomically consumes** one-time authorizations (re-grant on failed push); ref deletions and tag pushes denied outright
-- [ ] One-time rebase/force authorization records (granted by hub, consumed by hook)
-- [ ] Lease-expiry requeue appends on the same branch (no reset)
-- [ ] Serialized per-repo landing queue in scheduler (ff-merge when descendant; non-ff branches are **held** — rebase-instruction delivery arrives with R4; a stalled branch is skipped after a timeout rather than head-of-line blocking)
+- [x] Scheduler creates `refs/tasks/<activity>` at current main tip on promotion; job spec carries `{branch, base_sha}` (repair re-promotions reuse the ref — attempts append)
+- [x] Hub-generated pre-receive hook enforces: ref-match (active job bound to the branch) + token-match (leased jobs accept only their node's token) + fast-forward (creation pushes denied — hub pre-creates); denies pushes to any other ref incl. main (the operator write path flows through the GitHub remote + hub sync, never direct gitserver pushes); the hook is thin — it calls a supervisor API that validates pushes and **atomically consumes** one-time authorizations (FOR UPDATE SKIP LOCKED); ref deletions and tag pushes denied outright. Pushed-object quarantine dirs are forwarded so the hub-side git resolves new SHAs during pre-receive
+- [x] One-time rebase/force authorization records (granted by hub at landing turn, consumed by hook, unconsumed grants expire)
+- [x] Lease-expiry requeue appends on the same branch (no reset — branch rides on the job row)
+- [x] Serialized per-repo landing queue in scheduler (ff-merge when descendant; non-ff branches **held** — rebase-instruction delivery arrives with R4; a stalled branch re-issues instruction + grant after the stall timeout)
 
-**Acceptance (hub BDD):** push to wrong ref → rejected; push to task ref with wrong token → rejected; non-ff push without authorization → rejected; authorized rebase push → accepted once, replay rejected; after verified-complete, main ff-merges the branch; concurrent-landing fixture produces exactly one merge + one rebase instruction.
+**Acceptance:** ✅ hub BDD `git-plane.feature` (9 scenarios: branch pre-created with {branch, base_sha}; unassigned ref rejected; non-task ref rejected; foreign-node token rejected; ff by leasing node accepted; non-ff without authorization rejected; authorized rebase accepted once + replay rejected; verified-complete ff-merge to main; concurrent landing → exactly one merge + one held rebase instruction + grant). Deployed-stack integration via `e2e-gitplane.mjs` R2 section (real pushes through gitserver: unassigned rejected, assigned ff accepted, non-ff rejected, granted accepted, grant-consumed replay rejected). Hub+worker BDD and `e2e-demo` stay green.
 
 ### R3 — In-container checkout rework
-- [ ] Worker clones from gitserver (full clone, task branch) using CA + token; checks out `{branch, base_sha}`
-- [ ] Delete worktree code path and `CHECKOUT_STRATEGY` env; remove `/repo` bind mount from worker services
-- [ ] Checkout deleted on task end (exit-after-task makes the container itself ephemeral)
-- [ ] Worker work env exposes the hf-mount bucket path (per-task subfolder): workloads write artifacts there, commit git-side pointers on the task branch, read back through the mount before reporting done
+- [x] Worker clones from gitserver (full clone, task branch) using CA + token; checks out `{branch, base_sha}` (fetch + checkout of `refs/tasks/<activity>`; jobs without a branch are rejected)
+- [x] Delete worktree code path and `CHECKOUT_STRATEGY` env; remove `/repo` bind mount + `REPO_PATH` from worker services (compose, runner, .env.example)
+- [x] Checkout deleted on task end (runner finally-block; exit-after-task makes the container itself ephemeral)
+- [x] Work products committed and pushed to the task branch after the workload (attempts append — partial dead work stays visible); `HF_STORE_PATH` in worker env for per-task artifact subfolders (pointer commits via the same push)
 
-**Acceptance (worker BDD):** checkout scenario reworked — clone source is the gitserver URL fixture (fake hub/git server), correct branch checked out, workspace contains the branch content; no worktree/`/repo` references remain in worker code or compose.
+**Acceptance:** ✅ worker BDD (9 scenarios — checkout from gitserver-URL fixture at the task branch, branch-content tracked, commit+push advances the origin branch, branchless jobs rejected; no worktree/`CHECKOUT_STRATEGY`/`/repo` references remain in worker code or compose). Deployed: `e2e-demo` ALL CHECKS PASSED with workers cloning/pushing through the real gitserver — task branches visible in the bare repo, worker result commits appended, and the verified-complete baseline branch ff-merged to main by the landing queue.
 
 ### R4 — SSE worker-agent protocol + session model
 

@@ -79,6 +79,7 @@ export function parseGraph(graphYaml: string): Graph {
 export async function submitPlan(input: {
   name: string;
   graphYaml: string;
+  repo?: string;
   repoSubdir?: string;
 }): Promise<{ planId: string; approvalId: number }> {
   const graph = parseGraph(input.graphYaml);
@@ -91,9 +92,9 @@ export async function submitPlan(input: {
   try {
     await client.query("BEGIN");
     await client.query(
-      `INSERT INTO plans (id, name, goal_ref, repo_subdir, graph, status)
-       VALUES ($1, $2, $3, $4, $5, 'pending_approval')`,
-      [planId, input.name, graph.goal_ref ?? null, input.repoSubdir ?? null, JSON.stringify(graph)],
+      `INSERT INTO plans (id, name, goal_ref, repo_subdir, repo, graph, status)
+       VALUES ($1, $2, $3, $4, $5, $6, 'pending_approval')`,
+      [planId, input.name, graph.goal_ref ?? null, input.repoSubdir ?? null, input.repo ?? "demo", JSON.stringify(graph)],
     );
     for (const [id, act] of Object.entries(graph.activities)) {
       await client.query(

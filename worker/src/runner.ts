@@ -4,15 +4,19 @@ import { join, resolve, dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 
 /**
- * Worker runner (M3): pull work from the hub and host job workloads as
+ * Worker runner (R3): pull work from the hub and host job workloads as
  * **subprocesses inside this container** — no host docker socket, no sibling
  * containers: a compromised workload stays confined to the worker container
  * (root inside it, nothing on the host). Never accepts inbound connections.
  *
- * Env: HUB_URL, NODE_ID, NODE_TAGS, REPO_PATH, CHECKOUT_STRATEGY
- * (clone|worktree), WORK_DIR. The job spec's `image` field is advisory —
- * a declared stack, matched via node tags; the worker image must carry the
- * runtimes it serves (worker/Dockerfile).
+ * Git plane (R3): each job checks out its task branch from the hub gitserver
+ * — a FULL clone of `<GITSERVER_URL>/<repo>.git` (CA + worker token), fetch +
+ * checkout of `refs/tasks/<activity>` — and pushes results back to the same
+ * branch. The checkout is deleted at task end; no worktrees, no /repo mount.
+ *
+ * Env: HUB_URL, NODE_ID, NODE_TAGS, WORK_DIR, GITSERVER_URL, GIT_TOKEN_FILE
+ * (optional for non-http origins), GIT_SSL_CAINFO, HF_STORE_PATH. The job
+ * spec's `image` field is advisory — matched via node tags.
  */
 
 function getHub(): string {
@@ -20,8 +24,6 @@ function getHub(): string {
 }
 const NODE_ID = process.env.NODE_ID ?? `worker-${process.pid}`;
 const NODE_TAGS = parseTags(process.env.NODE_TAGS ?? "cpu:4");
-const REPO_PATH = resolve(process.env.REPO_PATH ?? "/repo");
-const STRATEGY = process.env.CHECKOUT_STRATEGY === "worktree" ? "worktree" : "clone";
 const WORK_DIR = resolve(process.env.WORK_DIR ?? "/work");
 const POLL_MS = 1_000;
 const HEARTBEAT_MS = 10_000;
@@ -36,6 +38,9 @@ interface JobSpec {
   workspace_subdir?: string | null;
   timeout_s: number;
   attempt?: number;
+  repo?: string;
+  branch?: string;
+  base_sha?: string;
 }
 
 export function parseTags(spec: string): Record<string, string | number | boolean> {
@@ -154,24 +159,57 @@ async function heartbeat(): Promise<void> {
   }
 }
 
-export function checkout(job: JobSpec): string {
-  // Reads env lazily so tests can configure REPO_PATH/WORK_DIR/strategy per run.
-  const REPO_PATH = resolve(process.env.REPO_PATH ?? "/repo");
-  const WORK_DIR = resolve(process.env.WORK_DIR ?? "/work");
-  const STRATEGY = process.env.CHECKOUT_STRATEGY === "worktree" ? "worktree" : "clone";
-  const dir = join(WORK_DIR, job.id);
-  mkdirSync(WORK_DIR, { recursive: true });
-  rmSync(dir, { recursive: true, force: true });
-  if (STRATEGY === "worktree") {
-    // Requires the mounted repo to be writable; shares .git objects.
-    // (safe.directory is set via global git config in the image; -c is ignored.)
-    const r = sh("git", ["worktree", "add", "-f", dir, "HEAD"], { cwd: REPO_PATH });
-    if (r.code !== 0) console.log(`[${NODE_ID}] worktree add failed, falling back to clone: ${r.stderr.slice(0, 300)}`);
-    else return dir;
+function originUrl(repo: string): string {
+  const gitserver = process.env.GITSERVER_URL;
+  if (!gitserver) throw new Error("GITSERVER_URL not configured (git-plane checkout)");
+  let url = `${gitserver.replace(/\/$/, "")}/${repo}.git`;
+  // Worker git token + internal CA apply to http(s) origins (the gitserver).
+  const tokenFile = process.env.GIT_TOKEN_FILE;
+  if (tokenFile && url.startsWith("http")) {
+    const token = readFileSync(tokenFile, "utf8").trim();
+    url = url.replace(/^(https?):\/\//, `$1://${encodeURIComponent(token)}@`);
   }
-  const r = sh("git", ["clone", "--quiet", "--no-hardlinks", REPO_PATH, dir]);
+  return url;
+}
+
+/** Clone origin + check out the job's task branch (git plane, DESIGN §3.2.1). */
+export function checkout(job: JobSpec): { dir: string; branch: string } {
+  const workDir = resolve(process.env.WORK_DIR ?? "/work");
+  const dir = join(workDir, job.id);
+  mkdirSync(workDir, { recursive: true });
+  rmSync(dir, { recursive: true, force: true });
+  if (!job.branch) {
+    throw new Error(`job ${job.id} carries no task branch (git-plane jobs need {repo, branch, base_sha})`);
+  }
+  const repo = job.repo ?? "demo";
+  const url = originUrl(repo);
+  let r = sh("git", ["clone", "--quiet", "--no-hardlinks", url, dir]);
   if (r.code !== 0) throw new Error(`git clone failed: ${r.stderr.slice(0, 500)}`);
-  return dir;
+  // Task refs live under refs/tasks/* — fetch explicitly and check out.
+  r = sh("git", ["fetch", "--quiet", "origin", job.branch], { cwd: dir });
+  if (r.code !== 0) throw new Error(`git fetch ${job.branch} failed: ${r.stderr.slice(0, 500)}`);
+  r = sh("git", ["checkout", "--quiet", "-B", "work", "FETCH_HEAD"], { cwd: dir });
+  if (r.code !== 0) throw new Error(`git checkout failed: ${r.stderr.slice(0, 500)}`);
+  // Worker commits (results push) need an identity.
+  sh("git", ["config", "user.name", `worker:${NODE_ID}`], { cwd: dir });
+  sh("git", ["config", "user.email", `${NODE_ID}@workers.autoresearch`], { cwd: dir });
+  return { dir, branch: job.branch };
+}
+
+/** Commit work products and push them to the job's task branch. */
+export function commitAndPush(job: JobSpec, dir: string): { pushed: boolean; detail: string } {
+  const repo = job.repo ?? "demo";
+  const url = originUrl(repo);
+  sh("git", ["remote", "set-url", "origin", url], { cwd: dir });
+  sh("git", ["add", "-A"], { cwd: dir });
+  const staged = sh("git", ["diff", "--cached", "--quiet"], { cwd: dir });
+  if (staged.code === 0) return { pushed: false, detail: "nothing to commit" };
+  let r = sh("git", ["commit", "--quiet", "-m", `job ${job.id}: results (attempt ${job.attempt ?? 1})`], { cwd: dir });
+  if (r.code !== 0) return { pushed: false, detail: `commit failed: ${r.stderr.slice(0, 300)}` };
+  if (!job.branch) return { pushed: false, detail: "no branch" };
+  r = sh("git", ["push", "--quiet", "origin", `HEAD:${job.branch}`], { cwd: dir });
+  if (r.code !== 0) return { pushed: false, detail: `push failed: ${r.stderr.slice(0, 300)}` };
+  return { pushed: true, detail: "pushed" };
 }
 
 interface Tailer {
@@ -261,8 +299,9 @@ async function executeJob(job: JobSpec): Promise<void> {
   busy = true;
   let checkoutDir = "";
   try {
-    console.log(`[${NODE_ID}] executing ${job.id}`);
-    checkoutDir = checkout(job);
+    console.log(`[${NODE_ID}] executing ${job.id} (repo=${job.repo ?? "demo"}, branch=${job.branch ?? "?"})`);
+    const co = checkout(job);
+    checkoutDir = co.dir;
     const workspace = join(checkoutDir, job.workspace_subdir ?? "");
     if (!existsSync(workspace)) throw new Error(`workspace subdir missing: ${job.workspace_subdir}`);
 
@@ -308,20 +347,27 @@ async function executeJob(job: JobSpec): Promise<void> {
 
     // Let the final progress lines flush before collecting evidence.
     await new Promise((r) => setTimeout(r, 500));
+    // Git plane: commit work products and push to the task branch (partial
+    // dead work on failures stays visible for audit — attempts append).
+    const push = commitAndPush(job, checkoutDir);
+    console.log(`[${NODE_ID}] job ${job.id}: task-branch push ${push.detail}`);
     await collectAndUpload(job, workspace);
     await hub(`/api/jobs/${job.id}/status`, {
       method: "POST",
       body: JSON.stringify({ state, exit_code: exitCode, attempt: job.attempt }),
     });
   } finally {
+    // Checkout lives exactly as long as the task (exit-after-task makes the
+    // container ephemeral; nothing durable lives only in the worker).
     if (checkoutDir) rmSync(checkoutDir, { recursive: true, force: true });
-    if (checkoutDir && STRATEGY === "worktree") sh("git", ["worktree", "prune"], { cwd: REPO_PATH });
     busy = false;
   }
 }
 
 async function main(): Promise<void> {
-  console.log(`[${NODE_ID}] worker runner up (hub=${getHub()}, repo=${resolve(process.env.REPO_PATH ?? "/repo")}, strategy=${process.env.CHECKOUT_STRATEGY ?? "clone"}, tags=${JSON.stringify(NODE_TAGS)})`);
+  console.log(
+    `[${NODE_ID}] worker runner up (hub=${getHub()}, gitserver=${process.env.GITSERVER_URL ?? "UNSET"}, tags=${JSON.stringify(NODE_TAGS)})`,
+  );
   setInterval(() => void heartbeat(), HEARTBEAT_MS);
   await heartbeat();
 

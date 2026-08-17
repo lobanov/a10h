@@ -29,12 +29,24 @@ Feature: Worker runner behavior
     Then the cancellation callback was invoked
     And the fake hub received exactly 1 event for job "cancel-1"
 
-  Scenario: Checkouts clone the project repo into the work dir
-    Given a git origin repo containing "seed.txt"
-    And REPO_PATH pointing at the origin and WORK_DIR pointing at an empty dir
-    When a checkout is created for job "clone-1"
+  Scenario: Checkouts clone the job's task branch from the gitserver origin
+    Given a gitserver origin repo containing "seed.txt"
+    And WORK_DIR pointing at an empty dir
+    When a checkout is created for job "clone-1" on task branch "refs/tasks/alpha"
     Then the checkout contains "seed.txt"
-    And the checkout is not the origin itself
+    And the checkout tracks content from the task branch
+
+  Scenario: Work products are committed and pushed to the task branch
+    Given a gitserver origin repo containing "seed.txt"
+    And WORK_DIR pointing at an empty dir
+    When a checkout is created for job "push-1" on task branch "refs/tasks/alpha"
+    When the job's work products are committed and pushed to the task branch
+    Then the push succeeds and the origin branch advanced
+
+  Scenario: Jobs without a task branch are rejected
+    Given a gitserver origin repo containing "seed.txt"
+    And WORK_DIR pointing at an empty dir
+    Then jobs without a task branch are rejected
 
   Scenario: Workloads run as subprocesses inside the worker
     Given a workspace containing progress.jsonl at "runs/x/progress.jsonl"

@@ -70,7 +70,7 @@ async function main() {
   const graphYaml = readFileSync(join(ROOT, "examples/demo-project/plan/graph.yaml"), "utf8");
   const submitted = await api("/api/plans", {
     method: "POST",
-    body: JSON.stringify({ name: PLAN_NAME, graph_yaml: graphYaml, repo_subdir: "examples/demo-project" }),
+    body: JSON.stringify({ name: PLAN_NAME, graph_yaml: graphYaml, repo: "demo", repo_subdir: "" }),
   });
   console.log(`[e2e] submitted plan ${submitted.plan_id}, approval #${submitted.approval_id}`);
 
