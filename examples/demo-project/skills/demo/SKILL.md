@@ -9,7 +9,7 @@ You are a worker executing ONE activity from `plan/graph.yaml` in this repo (the
 
 ## The two jobs in this repo
 
-1. **`jobs/simulate_training.py`** — simulated training run. Writes `metrics.json` (`variant`, `seed`, `config_hash`, `final_loss`, `succeeded`) and `progress.jsonl` under `--out`. Flags: `--variant baseline|curriculum-a|curriculum-b`, `--steps`, `--out runs/<activity>`, `--sabotage plateau|diverge` (demo-only: forces a failing run to exercise the repair loop).
+1. **`jobs/simulate_training.py`** — simulated training run. Writes `metrics.json` (`variant`, `seed`, `config_hash`, `final_loss`, `succeeded`) and `progress.jsonl` under `--out`. Flags: `--variant baseline|variant-a|variant-b`, `--steps`, `--out runs/<activity>`, `--sabotage plateau|diverge` (demo-only: forces a failing run to exercise the repair loop).
 2. **`jobs/analyze_results.py`** — reads one or more `--runs` dirs, validates their `metrics.json`, writes an analysis report to `--out`. Exits non-zero on missing/failed evidence — by design.
 
 Run `<script> --help` for the full contract; `plan/graph.yaml` is the source of truth for which activity runs what.

@@ -6,7 +6,7 @@
 
 goal_ref: goal.md
 version: 1
-status: draft            # draft -> pending_approval -> approved -> executing -> done
+status: draft            # authored initial value only; runtime status is hub-side (Postgres, frozen on approval)
 
 activities:
   baseline:
