@@ -1,0 +1,14 @@
+# Optional LiteLLM gateway (compose --profile litellm).
+# Agents use it only when Z_AI_BASE_URL / LOCAL_LLM_BASE_URL point here;
+# by default the hub talks to providers directly (documented in DESIGN.md §3.5).
+model_list:
+  - model_name: glm-5.2
+    litellm_params:
+      model: openai/glm-5.2
+      api_base: os.environ/Z_AI_BASE_URL
+      api_key: os.environ/Z_AI_API_KEY
+  - model_name: glm-5.3
+    litellm_params:
+      model: openai/glm-5.3
+      api_base: os.environ/Z_AI_BASE_URL
+      api_key: os.environ/Z_AI_API_KEY

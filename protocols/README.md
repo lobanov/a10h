@@ -26,8 +26,10 @@ Schema: [`job.schema.json`](job.schema.json)
 
 ## 2. Progress contract
 
-Jobs append JSON lines to `progress.jsonl` **in their working directory**
-(checked out at `/workspace` inside the job container):
+Jobs append JSON lines to a `progress.jsonl` **in their output location** —
+the working directory or any subdirectory (e.g. `runs/<variant>/progress.jsonl`).
+The runner discovers and tails every `progress.jsonl` under the job workspace
+(excluding `.git`), so multi-output jobs report from all of them:
 
 ```jsonc
 {"t": 1.23, "pct": 42.0, "eta_s": 61.7, "stage": "step 84/200", "metrics": {"loss": 0.51}}

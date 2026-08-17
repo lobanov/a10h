@@ -1,0 +1,17 @@
+{
+  "name": "autoresearch-spoke",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "tsx": "^4.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.0",
+    "typescript": "^5.6.0"
+  },
+  "scripts": {
+    "start": "tsx src/runner.ts",
+    "typecheck": "tsc --noEmit"
+  }
+}

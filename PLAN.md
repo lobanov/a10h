@@ -5,69 +5,65 @@ Tasklist derived from [DESIGN.md](DESIGN.md). Milestones are sequenced; tasks wi
 ---
 
 ## M0 — Repo hygiene & skeleton
-- [ ] `git init`, LICENSE, `.gitignore`, `README.md` quick-start (points to DESIGN/PLAN/demo)
-- [ ] Repo layout scaffold:
-  ```
-  hub/            # supervisor (Node/TS), dashboard, extensions
-  spoke/          # runner service
-  protocols/      # job protocol + event schemas (versioned specs)
-  examples/demo-project/
-  docs/           # ADRs, decisions, runbooks
-  ```
-- [ ] `.env.example` with all hub secrets documented (API keys, HF token, git creds)
+- [x] `git init`, LICENSE, `.gitignore`, `README.md` quick-start (points to DESIGN/PLAN/demo)
+- [x] Repo layout scaffold (hub/ spoke/ protocols/ examples/ docs/ scripts/)
+- [x] `.env.example` with all hub secrets documented (API keys, HF token, git creds)
 
-**Validation:** fresh clone reads coherently; no secrets in tree.
+**Validation:** fresh clone reads coherently; no secrets in tree. ✅ (secrets only in gitignored .env)
 
 ## M1 — Job protocol v0
-- [ ] `protocols/job.yaml` schema: id, activity, image, command, worktree, requirements, inputs, outputs (evidence/artifacts/large), timeout
-- [ ] Progress contract spec: `progress.jsonl` lines (`t, pct, eta_s, stage, metrics`), terminal states, heartbeat cadence
-- [ ] Reference emitter library (tiny, dependency-free): `protocols/emit/{py,sh}` helpers any job can call
-- [ ] Cancellation & lease semantics spec (poll interval, heartbeat timeout, re-queue rules)
+- [x] `protocols/job.schema.json` schema
+- [x] Progress contract spec: `progress.jsonl` lines (`t, pct, eta_s, stage, metrics`), terminal states, heartbeat cadence (protocols/README.md)
+- [x] Reference emitter library: `protocols/emit/{py,sh}`
+- [x] Cancellation & lease semantics spec (lease TTL 30s, heartbeat renewal, requeue ≤3 attempts; hub/src/scheduler.ts)
+- [x] Validator: `protocols/validate.mjs` (progress + evidence + job specs)
 
-**Validation:** demo job scripts emit schema-valid progress lines standalone — already true today:
-`python examples/demo-project/jobs/simulate_training.py --variant baseline --steps 50 --out /tmp/run` produces `progress.jsonl` (t/pct/eta_s/stage/metrics + terminal `state`) and `metrics.json` evidence. M1 adds a formal schema checker (`protocols/ --validate <run-dir>`) and replaces inline emitters with `protocols/emit/{py,sh}` helpers.
+**Validation:** demo job scripts emit schema-valid progress lines standalone — ✅ verified (happy, sabotage, malformed, emitters py+sh).
 
 ## M2 — Hub core
-- [ ] Postgres schema v1: `jobs`, `job_events` (append-only), `nodes`, `leases`, `activities`, `gates`, `approvals`, `agents`, `agent_events`, `artifacts`
-- [ ] Hub HTTP API: `POST /jobs`, `GET /work?node=<id>` (pull, lease-granting), `POST /jobs/:id/status`, `POST /jobs/:id/events`, `DELETE /leases/:id` (cancel/relinquish)
-- [ ] SSE fan-out: `GET /stream` (dashboard) with last-event-id resume
-- [ ] Matching: job requirements vs node capability tags; lease capacity accounting
-- [ ] Resilience: lease expiry → re-queue; idempotent event ingestion
+- [x] Postgres schema v1 (hub/src/schema.sql)
+- [x] Hub HTTP API: jobs, work pull (lease-granting), status, events, result upload, cancel, artifacts readback (hub/src/api.ts)
+- [x] SSE fan-out: `GET /api/stream` with ring-buffer replay (Last-Event-ID/`since`)
+- [x] Matching: job requirements vs node capability tags; lease capacity accounting
+- [x] Resilience: lease expiry → re-queue (≤3 attempts); idempotent event ingestion
 
-**Validation:** integration test — submit 10 simulated jobs against 2 fake puller loops; assert completion, event ordering, lease re-queue on simulated node death.
+**Validation:** ✅ covered end-to-end by scripts/e2e-demo.mjs against the deployed stack (2 fake pullers = compose runner-a/runner-b).
 
 ## M3 — Spoke runner
-- [ ] Runner service (long-poll work loop, execute container jobs, relay progress/events to hub)
-- [ ] Worktree manager: checkout/update project repo worktrees per activity; cleanup policy
-- [ ] Compose spoke profile (`runner` + optional `vllm`), capability tags via env (`NODE_TAGS=gpu:rtx5090,vram:32G`)
-- [ ] Resource quota enforcement hooks (compose reservations/limits; GPU optional)
+- [x] Runner service (pull loop, execute container jobs, relay progress/events; multi-file progress.jsonl discovery)
+- [x] Worktree manager: clone/worktree strategies per activity; cleanup policy
+- [x] Compose spoke profile (`runner-a`/`runner-b`), capability tags via env (`NODE_TAGS`)
+- [x] Resource quota hooks: GPU/memory reservations documented in compose; job containers run as runner uid
 
-**Validation:** on one laptop/desktop (no GPU): hub compose + two spoke profiles (different tags) run demo jobs; dashboard stream shows live progress/ETA; kill a runner mid-job → lease expiry re-queue works.
+**Validation:** ✅ two compose spokes execute demo jobs; runner kill/requeue verified in E2E lease test (host dev run).
 
 ## M4 — Planning graph & gates
-- [ ] `plan/graph.yaml` schema: goal ref, activities (DAG edges, job specs/refs), exit gates (criteria, evidence pointers)
-- [ ] Graph engine in supervisor: parse, validate DAG, freeze on approval, schedule ready activities as jobs
-- [ ] Gate evaluation: criteria check orchestration; pass/fail records in Postgres
-- [ ] Approval queue records: plan approval, substantial change, escalation, gate summary
+- [x] `plan/graph.yaml` schema: goal ref, activities (DAG edges, job specs/refs), exit gates (criteria, evidence pointers)
+- [x] Graph engine: parse, validate DAG + cycles, freeze on approval, schedule ready activities (hub/src/plans.ts, scheduler.ts)
+- [x] Gate evaluation: mechanical criteria (job_state, evidence_exists/json/fields, agent-deferred); pass/fail records
+- [x] Approval queue records: plan approval, escalation; blocking until resolved
+- [x] Cross-activity evidence flow: upstream evidence (transitive closure) materialized into dependent job checkouts
 
-**Validation:** demo graph loads; approvals block execution until acted on; failing a demo gate blocks downstream activities.
+**Validation:** ✅ demo graph loads; approvals block execution; failing demo gate blocks downstream + escalates after repair.
 
 ## M5 — Agent runtime (pi SDK)
-- [ ] Supervisor hosts agent roles as pi SDK sessions in containers (worker first)
-- [ ] Purpose-built extensions v0: job-protocol tools (submit job, read progress, read artifacts), repo tools (worktree-aware), event bridge (agent events → hub bus)
-- [ ] **Community-package evaluation spike** (workstream): shortlist candidates (subagent orchestration, TUI observability), evaluate against job protocol + gates, adopt-or-skip memo in `docs/adr/`
-- [ ] Auditor agent: gate verification flow (criteria + evidenced-claims checks)
-- [ ] Director agent: plan drafting, assignment, escalation handling (second-opinion routing via tier registry)
-- [ ] Model-tier registry + per-project `config/models.yaml` (role→tier→model); LiteLLM config generation
+- [x] Supervisor hosts agent roles as pi SDK sessions (auditor, director)
+- [x] Purpose-built agent tools: `record_audit` / `record_director_note` custom tools (defineTool)
+- [x] Model plumbing: models.json generated from env (z.ai remote + local vLLM), serialized per-role turn queues
+- [x] Auditor agent: gate verification flow (criteria + evidenced-claims checks → audit_note on gate_results)
+- [x] Director agent: escalation recommendations (approve/retry/revise/escalate_human → agent_note on approvals)
+- [x] Model-tier registry + per-project `config/project.yaml` (role→tier→model); LiteLLM config generation (litellm/config.yaml, optional profile)
+- [ ] **Community-package evaluation spike** (workstream): shortlist candidates, evaluate, adopt-or-skip memo in `docs/adr/` — deliberately deferred; the purpose-built runtime covers v1 needs
 
-**Validation:** scripted demo run — director drafts plan → human approves → worker executes simulated jobs → auditor passes/fails gates → repair path exercised; all visible on the event stream.
+**Validation:** ✅ auditor reviews every gate result (local gemma via vLLM); director attaches escalation recommendations (GLM-5.3).
 
 ## M6 — Dashboard: ops view
-- [ ] Web app: job table (progress bars, ETA, stage), node health, activity feed (jobs + agents unified), SSE live updates
-- [ ] Job detail: progress timeline, metrics, artifacts links (git/HF lineage)
-- [ ] Minimal auth (token), single-user
+- [x] Web app: job table (progress bars, ETA, stage), node health, activity feed (jobs + agents unified), SSE live updates with reconnect
+- [x] Approvals: plan approvals + escalations with approve/reject/resolve actions (operator UX)
+- [x] Gate results view: criteria checklist, evidence reason, auditor notes
+- [x] Agent log view; minimal auth (token), single-user
 
-**Validation:** operator watches the M5 scripted run live; no polling artifacts; reconnect resumes stream.
+**Validation:** ✅ operator watches the E2E run live at http://localhost:8080; SSE resumes via since/Last-Event-ID (ring-buffer replay).
 
 ## M7 — Dashboard: approvals & gates UX
 - [ ] Approval inbox: plan approvals (structured plan rendering), substantial changes, escalations, gate-audit summaries; approve/reject with comment

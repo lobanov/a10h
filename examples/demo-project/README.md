@@ -90,20 +90,40 @@ This is the artifact shape the **auditor** would reject at the `baseline-gate` (
 2. Open `skills/worker-researcher/SKILL.md` — see the retrospective template every worker fills at exit.
 3. Open `skills/reflector/SKILL.md` — see how retrospectives + audit anomalies become skill/plan proposals.
 
-### Part E — Full stack (future, ~10 min once implemented)
+### Part E — Full stack (deployed framework, ~10 min)
 
-Requires PLAN.md milestones M1–M3 (job plane) and M4–M6 (governance + dashboard):
+The framework deploys via docker-compose (see repo `DESIGN.md` §4):
 
 ```bash
-# (not yet implemented — tracked in PLAN.md)
+# one-time: framework repo + model weights + env
 git clone <framework-repo> && cd <framework-repo>
-docker-compose up -d                    # hub: supervisor, postgres, dashboard, litellm
-HUB_URL=http://hub:8080 docker-compose --profile spoke up -d   # spoke #1
-docker-compose --profile spoke up -d    # spoke #2 (second node, day one)
-# open http://localhost:8080 → approve the demo plan → watch the graph execute
+./scripts/fetch-models.sh                     # 15.8 GB local auditor model (optional)
+cp .env.example .env                          # fill Z_AI_API_KEY (director agent)
+
+# deploy: hub + postgres + two spokes (+ local vLLM when weights present)
+docker compose up -d postgres hub
+docker compose --profile spoke up -d
+docker compose --profile local-llm up -d vllm   # optional local auditor model
+
+open http://localhost:8080                     # dashboard: ops view + approvals
 ```
 
-You should see: plan approval in the inbox → jobs scheduled across two spokes → live progress/ETA → gates audited → one forced repair (Part C sabotage is part of the demo plan) → final analysis + retrospective.
+Then submit the demo plan and drive it end-to-end (submission, approval, both
+spokes pulling work, gates, repair, escalation, agent notes):
+
+```bash
+node scripts/e2e-demo.mjs http://localhost:8080
+```
+
+You should see (in the dashboard and the e2e output): plan approval **blocking
+execution** until approved → jobs scheduled across two spokes → live progress/ETA
+→ gates audited → the deliberate `repair-demo` gate fails, repairs, and
+**escalates** with a director recommendation → operator resolves → plan done,
+with auditor notes attached to every gate result.
+
+Without the optional vLLM profile, the same flow runs with agents disabled
+(set `AUDITOR_MODEL`/`DIRECTOR_MODEL` to a remote provider in `.env` to keep
+agents on instead).
 
 ---
 

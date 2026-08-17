@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pi Autoresearch Lab</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <h1>Pi Autoresearch Lab</h1>
+    <span id="conn" class="chip pending">connecting…</span>
+    <span id="agents" class="chip"></span>
+  </header>
+
+  <main>
+    <section id="approvals" class="panel">
+      <h2>Approvals</h2>
+      <div id="approval-list" class="cards"></div>
+    </section>
+
+    <section id="plans" class="panel">
+      <h2>Plans &amp; Activities</h2>
+      <div id="plan-list"></div>
+    </section>
+
+    <section id="jobs" class="panel">
+      <h2>Jobs</h2>
+      <table>
+        <thead>
+          <tr><th>job</th><th>activity</th><th>node</th><th>status</th><th style="width:22%">progress</th><th>eta</th><th>stage</th></tr>
+        </thead>
+        <tbody id="job-rows"></tbody>
+      </table>
+    </section>
+
+    <section id="nodes" class="panel">
+      <h2>Nodes</h2>
+      <div id="node-list" class="chips"></div>
+    </section>
+
+    <section id="gates" class="panel">
+      <h2>Gate results &amp; audits</h2>
+      <div id="gate-list"></div>
+    </section>
+
+    <section id="feed" class="panel">
+      <h2>Live feed</h2>
+      <pre id="event-log"></pre>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

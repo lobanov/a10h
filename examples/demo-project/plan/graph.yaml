@@ -1,5 +1,6 @@
 # Planning graph — demo project
-# Schema: DESIGN.md §5.3. Reviewed & approved BEFORE execution.
+# Schema: DESIGN.md §5.3 + protocols (gate criteria are mechanical checks;
+# `type: agent` criteria defer to the auditor agent's reasonableness pass).
 # Human approves: goal (goal.md), this first plan, and substantial changes.
 # Director may revise iff goal unchanged AND auditor satisfied.
 
@@ -15,15 +16,21 @@ activities:
       image: python:3.12-slim
       command: ["python", "jobs/simulate_training.py", "--variant", "baseline",
                 "--steps", "200", "--out", "runs/baseline"]
-      requirements: { gpu: false, cpu: 1, mem: 512M }
+      requirements: { gpu: false, cpu: 1 }
       timeout_s: 600
+      outputs:
+        evidence: [runs/baseline/metrics.json]
+        artifacts: [runs/baseline/progress.jsonl]
     exit_gate:
       id: baseline-gate
       criteria:
-        - "exit state == succeeded"
-        - "metrics.json: final_loss < 0.5"
-        - "metrics.json: seed present and config hash matches job spec"
-      evidence: ["runs/baseline/metrics.json"]
+        - id: exit_ok
+          check: {type: job_state, equals: succeeded}
+        - id: loss_below
+          check: {type: evidence_json, file: metrics.json, field: final_loss, op: lt, value: 0.5}
+        - id: reproducible
+          check: {type: evidence_fields, file: metrics.json, fields: [seed, config_hash]}
+      evidence: [runs/baseline/metrics.json]
       auditor_skill: skills/auditor/SKILL.md
 
   variant-a:
@@ -33,14 +40,20 @@ activities:
       image: python:3.12-slim
       command: ["python", "jobs/simulate_training.py", "--variant", "variant-a",
                 "--steps", "200", "--out", "runs/variant-a"]
-      requirements: { gpu: false, cpu: 1, mem: 512M }
+      requirements: { gpu: false, cpu: 1 }
       timeout_s: 600
+      outputs:
+        evidence: [runs/variant-a/metrics.json]
+        artifacts: [runs/variant-a/progress.jsonl]
     exit_gate:
       id: variant-a-gate
       criteria:
-        - "exit state == succeeded"
-        - "metrics.json: final_loss < baseline.final_loss * 1.10"
-      evidence: ["runs/variant-a/metrics.json"]
+        - id: exit_ok
+          check: {type: job_state, equals: succeeded}
+        - id: loss_sane
+          check: {type: evidence_json, file: metrics.json, field: final_loss, op: lt, value: 0.6}
+        - id: reproducible
+          check: {type: evidence_fields, file: metrics.json, fields: [seed, config_hash]}
 
   variant-b:
     title: "Train curriculum variant B (hard→easy, control)"
@@ -49,14 +62,20 @@ activities:
       image: python:3.12-slim
       command: ["python", "jobs/simulate_training.py", "--variant", "variant-b",
                 "--steps", "200", "--out", "runs/variant-b"]
-      requirements: { gpu: false, cpu: 1, mem: 512M }
+      requirements: { gpu: false, cpu: 1 }
       timeout_s: 600
+      outputs:
+        evidence: [runs/variant-b/metrics.json]
+        artifacts: [runs/variant-b/progress.jsonl]
     exit_gate:
       id: variant-b-gate
       criteria:
-        - "exit state == succeeded"
-        - "metrics.json: final_loss < 0.6"
-      evidence: ["runs/variant-b/metrics.json"]
+        - id: exit_ok
+          check: {type: job_state, equals: succeeded}
+        - id: loss_sane
+          check: {type: evidence_json, file: metrics.json, field: final_loss, op: lt, value: 0.6}
+        - id: reproducible
+          check: {type: evidence_fields, file: metrics.json, fields: [seed, config_hash]}
 
   analysis:
     title: "Compare convergence across curricula"
@@ -66,21 +85,29 @@ activities:
       command: ["python", "jobs/analyze_results.py",
                 "--runs", "runs/baseline", "runs/variant-a", "runs/variant-b",
                 "--out", "runs/analysis"]
-      requirements: { gpu: false, cpu: 1, mem: 512M }
+      requirements: { gpu: false, cpu: 1 }
       timeout_s: 300
+      outputs:
+        evidence: [runs/analysis/summary.md, runs/analysis/retrospective.md]
+        artifacts: [runs/analysis/progress.jsonl]
     exit_gate:
       id: analysis-gate
       criteria:
-        - "exit state == succeeded"
-        - "summary.md exists and states effect sizes for all pairwise comparisons"
-        - "retrospective.md exists (worker exit requirement)"
-      evidence: ["runs/analysis/summary.md", "runs/analysis/retrospective.md"]
+        - id: exit_ok
+          check: {type: job_state, equals: succeeded}
+        - id: summary_exists
+          check: {type: evidence_exists, file: summary.md}
+        - id: retrospective_exists
+          check: {type: evidence_exists, file: retrospective.md}
+        - id: comparison_reasonable
+          check: {type: agent, note: summary must state pairwise comparisons for all variants}
+      evidence: [runs/analysis/summary.md, runs/analysis/retrospective.md]
 
   repair-demo:
     title: "DELIBERATE FAILURE: exercises the repair loop"
     description: >
       Runs the sabotaged trainer. Its gate WILL fail (final_loss >= 0.5),
-      routing work back to the worker for repair — the governance path
+      routing work back for repair, then escalating — the governance path
       from DESIGN.md §5.2. Included on purpose: a demo where nothing
       fails validates nothing.
     depends_on: [baseline]
@@ -88,12 +115,17 @@ activities:
       image: python:3.12-slim
       command: ["python", "jobs/simulate_training.py", "--variant", "baseline",
                 "--steps", "200", "--out", "runs/bad", "--sabotage", "plateau"]
-      requirements: { gpu: false, cpu: 1, mem: 512M }
+      requirements: { gpu: false, cpu: 1 }
       timeout_s: 600
+      outputs:
+        evidence: [runs/bad/metrics.json]
+        artifacts: [runs/bad/progress.jsonl]
     exit_gate:
       id: repair-demo-gate
       criteria:
-        - "exit state == succeeded"
-        - "metrics.json: final_loss < 0.5"
-      evidence: ["runs/bad/metrics.json"]
+        - id: exit_ok
+          check: {type: job_state, equals: succeeded}
+        - id: loss_below
+          check: {type: evidence_json, file: metrics.json, field: final_loss, op: lt, value: 0.5}
+      evidence: [runs/bad/metrics.json]
       expected_outcome: gate_failure_then_repair

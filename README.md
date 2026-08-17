@@ -2,7 +2,7 @@
 
 A multi-agent research lab built on the [Pi coding agent](https://pi.dev): agents plan, run, audit, and reflect on experimental AI-architecture research across local GPUs (RTX 5090, DGX Spark) and remote LLM APIs — with a human operator supervising through a web dashboard.
 
-> **Status:** pre-alpha — design + plan + demo scaffold only. See [PLAN.md](PLAN.md) for the build sequence. The demo's job scripts run standalone today; the full stack lands with milestones M1–M6.
+> **Status:** alpha — M1–M6 implemented (job protocol, hub, runner, gates, agents, dashboard); deployed via docker-compose. See [PLAN.md](PLAN.md). The demo runs standalone (Parts A–D) and end-to-end through the deployed stack (Part E).
 
 ## What it is
 
@@ -22,10 +22,10 @@ A multi-agent research lab built on the [Pi coding agent](https://pi.dev): agent
 
 ```bash
 cd examples/demo-project
-python jobs/simulate_training.py --variant baseline --steps 200 --out runs/baseline
-python jobs/simulate_training.py --variant variant-a --steps 200 --out runs/variant-a
-python jobs/simulate_training.py --variant variant-b --steps 200 --out runs/variant-b
-python jobs/analyze_results.py --runs runs/baseline runs/variant-a runs/variant-b --out runs/analysis
+python3 jobs/simulate_training.py --variant baseline --steps 200 --out runs/baseline
+python3 jobs/simulate_training.py --variant variant-a --steps 200 --out runs/variant-a
+python3 jobs/simulate_training.py --variant variant-b --steps 200 --out runs/variant-b
+python3 jobs/analyze_results.py --runs runs/baseline runs/variant-a runs/variant-b --out runs/analysis
 ```
 
 Then follow the full walkthrough: [examples/demo-project/README.md](examples/demo-project/README.md).
