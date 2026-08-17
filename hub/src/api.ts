@@ -7,7 +7,7 @@ import { pool } from "./db.ts";
 import { bus } from "./bus.ts";
 import { submitPlan, approvePlan, PlanError } from "./plans.ts";
 import { tick, LEASE_TTL_S, nodeMatches, resolveEscalation } from "./scheduler.ts";
-import { authenticateGit, preReceivePolicy, syncUpstream } from "./gitsvc.ts";
+import { authenticateGit, preReceivePolicyFull, syncUpstream, landBranch, loadPolicy } from "./gitsvc.ts";
 
 /**
  * Hub HTTP API (DESIGN.md §3.2, §4). Pull-only hub-workers: workers call
@@ -373,14 +373,34 @@ export function createHttpServer(): ReturnType<typeof createHttpServerRaw> {
         const body = JSON.parse((await readBody(req)).toString("utf8")) as {
           repo?: string;
           token?: string;
+          obj_dir?: string;
+          alt_dirs?: string;
           pushes?: Array<{ old: string; new: string; ref: string }>;
         };
-        const info = body.token ? loadPolicySafe()[body.token] : undefined;
+        const info = body.token ? loadPolicy().tokens[body.token] : undefined;
         if (!info || !body.repo || !body.pushes?.length || !body.token) {
           return json(res, 200, { allow: false, messages: ["invalid token or payload"] });
         }
-        const verdict = preReceivePolicy(body.token, info, body.pushes);
+        const verdict = await preReceivePolicyFull(
+          body.repo,
+          body.token,
+          info,
+          body.pushes,
+          { obj_dir: body.obj_dir, alt_dirs: body.alt_dirs },
+        );
         return json(res, 200, verdict);
+      }
+
+      if (route === "POST /internal/git/land") {
+        const body = JSON.parse((await readBody(req)).toString("utf8")) as {
+          repo?: string;
+          activity?: string;
+          plan_id?: string | null;
+          job_id?: string;
+        };
+        if (!body.repo || !body.activity) return json(res, 400, { error: "repo, activity required" });
+        const result = await landBranch(body.repo, body.plan_id ?? null, body.activity, body.job_id);
+        return json(res, 200, result);
       }
 
       if (route === "POST /internal/git/sync") {
@@ -429,14 +449,4 @@ export function createHttpServer(): ReturnType<typeof createHttpServerRaw> {
     return server;
   }
   return createHttpServerRaw(handler);
-}
-
-function loadPolicySafe(): Record<string, { role: string; node: string; repos: string[] }> {
-  try {
-    return (JSON.parse(readFileSync(process.env.POLICY_PATH ?? "/data/git/policy.json", "utf8")) as {
-      tokens: Record<string, { role: string; node: string; repos: string[] }>
-    }).tokens ?? {};
-  } catch {
-    return {};
-  }
 }

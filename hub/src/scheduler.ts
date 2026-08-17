@@ -2,6 +2,7 @@ import { pool } from "./db.ts";
 import { bus } from "./bus.ts";
 import { evaluateCriteria, type Criterion, type EvidenceFile } from "./gates.ts";
 import { queueAudit, queueDirector } from "./agents.ts";
+import { createTaskBranch, landBranch } from "./gitsvc.ts";
 
 /**
  * Scheduler: runs every tick.
@@ -22,6 +23,7 @@ export async function tick(): Promise<void> {
   await requeueExpiredLeases();
   await promoteReadyActivities();
   await evaluateTerminalGates();
+  await landVerifiedActivities();
   await finalizePlans();
 }
 
@@ -76,8 +78,9 @@ export function nodeMatches(
 }
 
 async function promoteReadyActivities(): Promise<void> {
-  const plans = await pool.query("SELECT id, repo_subdir FROM plans WHERE status IN ('approved', 'executing')");
+  const plans = await pool.query("SELECT id, repo_subdir, repo FROM plans WHERE status IN ('approved', 'executing')");
   for (const plan of plans.rows) {
+    const repo = plan.repo ?? "demo";
     const acts = await pool.query("SELECT * FROM activities WHERE plan_id = $1", [plan.id]);
     const byId = new Map(acts.rows.map((a) => [a.id, a]));
     for (const act of acts.rows) {
@@ -91,6 +94,10 @@ async function promoteReadyActivities(): Promise<void> {
       });
       if (!depsOk) continue;
       const jobId = `${act.id}--a${act.attempt + 1}--${rand()}`;
+      // R2: pre-create the task branch at main's tip; the job spec carries
+      // {branch, base_sha}. Repair re-promotions reuse the existing ref
+      // (attempts append on the same branch).
+      const { branch, base_sha } = await createTaskBranch(repo, act.id);
       // Cross-activity data flow: materialize upstream activities' evidence
       // (e.g. training metrics.json) into this job's checkout pre-run.
       // Transitive closure: analysis needs baseline metrics even though it
@@ -123,8 +130,9 @@ async function promoteReadyActivities(): Promise<void> {
       try {
         await pool.query(
           `INSERT INTO jobs (id, plan_id, activity, image, command, requirements, outputs,
-                             inputs_evidence, workspace_subdir, timeout_s, status, attempt)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'queued',$11)`,
+                             inputs_evidence, workspace_subdir, timeout_s, status, attempt,
+                             repo, branch, base_sha)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'queued',$11,$12,$13,$14)`,
           [
             jobId,
             plan.id,
@@ -137,6 +145,9 @@ async function promoteReadyActivities(): Promise<void> {
             plan.repo_subdir,
             act.job.timeout_s ?? 3600,
             act.attempt + 1,
+            repo,
+            branch,
+            base_sha,
           ],
         );
         await pool.query(
@@ -299,6 +310,40 @@ export async function resolveEscalation(approvalId: number, disposition: "accept
     throw e;
   } finally {
     client.release();
+  }
+}
+
+/**
+ * R2 landing queue: activities whose gate PASSED and whose agent audit note
+ * exists (verified-complete) merge to main through the serialized per-repo
+ * writer. Non-ff branches are held with a rebase instruction + one-time
+ * force grant (delivered via SSE in R4; re-issued after the stall timeout).
+ */
+async function landVerifiedActivities(): Promise<void> {
+  const rows = await pool.query(
+    `SELECT a.plan_id, a.id AS activity, a.job_id, p.repo
+     FROM activities a
+     JOIN plans p ON p.id = a.plan_id
+     JOIN gate_results gr ON gr.plan_id = a.plan_id AND gr.activity = a.id
+     WHERE a.status = 'passed' AND a.merged_sha IS NULL AND gr.audit_note IS NOT NULL`,
+  );
+  const seen = new Set<string>();
+  for (const row of rows.rows) {
+    const key = `${row.plan_id}/${row.activity}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const repo = row.repo ?? "demo";
+    try {
+      const result = await landBranch(repo, row.plan_id, row.activity, row.job_id);
+      bus.publish("activity", {
+        plan_id: row.plan_id,
+        activity: row.activity,
+        status: result.outcome === "merged" ? "landed" : "landing_held",
+        landing: result,
+      });
+    } catch (e) {
+      console.error(`[scheduler] landing ${key} failed:`, (e as Error).message);
+    }
   }
 }
 

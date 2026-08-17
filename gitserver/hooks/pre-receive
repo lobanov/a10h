@@ -12,8 +12,10 @@ HUB="${HUB_INTERNAL_URL:-https://hub:8080}"
 CACERT="${GIT_CA_CERT:-/data/git/ca/ca.crt}"
 REPO="$(basename "$(cd "$(dirname "$0")/.." && pwd)" .git)"
 
-# stdin lines: "<old-sha> <new-sha> <ref>" — build one JSON payload.
-payload='{"repo":"'"$REPO"'","token":"'"${REMOTE_USER:-}"'","pushes":['
+# stdin lines: "<old-sha> <new-sha> <ref>" — build one JSON payload. The
+# pushed objects sit in git's quarantine dir during pre-receive; forward it
+# (plus alternates) so the hub's git can resolve the new SHAs.
+payload='{"repo":"'"$REPO"'","token":"'"${REMOTE_USER:-}"'","obj_dir":"'"${GIT_OBJECT_DIRECTORY:-}"'","alt_dirs":"'"${GIT_ALTERNATE_OBJECT_DIRECTORIES:-}"'","pushes":['
 first=1
 while read -r old new ref; do
   [ -n "$ref" ] || continue

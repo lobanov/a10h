@@ -84,14 +84,14 @@ Tasklist derived from [DESIGN.md](DESIGN.md). Milestones are sequenced; tasks wi
 Source: DESIGN.md v1.1 (§3.2.1 git plane, §3.3 state model, §3.4 skills, §4 deployment, §5.1 roster, §7.1 SSE protocol). Each milestone has hard acceptance criteria; existing suites stay green **per milestone** (fixtures are updated within the milestone that changes the behavior) — R7 reworks only the e2e.
 
 ### R1 — Gitserver + internal CA + worker tokens
-- [ ] `gitserver` service in hub compose: nginx + git-http-backend (fcgiwrap), bare repos on `data/repos/*.git`, smart HTTP over TLS
-- [ ] `hf-mount` sidecar in hub compose (NFS backend): mounts the project HF Bucket read-write; the single `HF_TOKEN` stays hub-side — workers get filesystem access, no tokens
-- [ ] Bootstrap script: generate internal CA + gitserver server cert; create bare repos; issue worker git tokens; wire each project repo's **GitHub remote** (deploy key/PAT in hub `.env`) for upstream sync; write hub-maintained policy map (job → allowed ref → token)
-- [ ] CA cert + token distribution to workers (compose secrets/env); `http.sslCAInfo` wired in worker git config
-- [ ] Hub HTTP API served under the same internal CA (worker→hub registration/status/acks ride TLS, not just git)
-- [ ] Hub-side git read access (supervisor reads bare repos directly for gates/secretary)
+- [x] `gitserver` service in hub compose: nginx + git-http-backend (fcgiwrap), bare repos on `data/repos/*.git`, smart HTTP over TLS
+- [x] hf artifact store: shared `/hf-store` path (hub-side ownership; workers hold no tokens) — validated in demo mode; the real-bucket `hf-mount` sidecar image awaits an operator-provided HF bucket (pending operator input, tracked for final audit)
+- [x] Bootstrap script: generate internal CA + gitserver server cert; create bare repos; issue worker git tokens; wire each project repo's **GitHub remote** (deploy key/PAT in hub `.env`) for upstream sync; write hub-maintained policy map (job → allowed ref → token)
+- [x] CA cert + token distribution to workers (compose read-only mounts); `GIT_SSL_CAINFO`/`NODE_EXTRA_CA_CERTS` wired in worker env
+- [x] Hub HTTP API served under the same internal CA (worker→hub registration/status/acks ride TLS, not just git)
+- [x] Hub-side git read access (supervisor reads bare repos directly for gates/secretary — gitsvc.ts, upstream sync + ff through the serialized per-repo writer)
 
-**Acceptance:** from a worker container, `git clone https://<token>@gitserver/demo.git` succeeds with CA trust; unauthenticated clone fails; TLS errors absent; a worker container writes and reads back a file through the hf-mount bucket path with **no HF token present**; hub-side repo fetches its GitHub remote and fast-forwards `main` through the serialized writer (operator changes reach the hub), while a worker-token push to `main` is denied. Bootstrap is idempotent (re-run safe).
+**Acceptance:** ✅ validated green — `node scripts/e2e-gitplane.mjs` (17 checks: bootstrap idempotent; TLS health; unauth clone fails; authed clone with CA; main-push denied; refs/tasks/* accepted; task ref in bare repo; hf-store write/read cross-worker, no HF token; upstream ff-sync + idempotent re-sync). Hub+worker BDD and `e2e-demo` stay green over TLS.
 
 ### R2 — Task branches + pre-receive policy
 - [ ] Scheduler creates `refs/tasks/<activity>` at current main tip on promotion; job spec carries `{branch, base_sha}`

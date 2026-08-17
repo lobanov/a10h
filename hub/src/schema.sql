@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS jobs(
 );
 CREATE INDEX IF NOT EXISTS jobs_status_idx ON jobs(status);
 
+
 CREATE TABLE IF NOT EXISTS job_events(
   seq BIGSERIAL PRIMARY KEY,
   job_id TEXT NOT NULL,
@@ -105,4 +106,37 @@ CREATE TABLE IF NOT EXISTS agent_log(
   event TEXT NOT NULL,
   data JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- R2 git plane: job carries its task branch (hub pre-created at promotion).
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS repo TEXT;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS branch TEXT;      -- refs/tasks/<activity>
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS base_sha TEXT;
+ALTER TABLE plans ADD COLUMN IF NOT EXISTS repo TEXT;        -- bare repo name (data/repos/<repo>.git)
+ALTER TABLE activities ADD COLUMN IF NOT EXISTS merged_sha TEXT; -- set when the task branch lands on main
+
+-- R2: one-time rebase/force authorizations, granted by the hub when a
+-- landing turn requires a worker rebase; atomically consumed by the
+-- pre-receive hook; unconsumed grants expire.
+CREATE TABLE IF NOT EXISTS git_force_auth(
+  id SERIAL PRIMARY KEY,
+  repo TEXT NOT NULL,
+  ref TEXT NOT NULL,
+  job_id TEXT,
+  granted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  consumed_at TIMESTAMPTZ,
+  expires_at TIMESTAMPTZ NOT NULL DEFAULT now() + interval '1 hour'
+);
+
+-- R2: rebase instructions for held (non-ff) branches; delivered to workers
+-- via SSE in R4, retried after LANDING_STALL_TIMEOUT_S.
+CREATE TABLE IF NOT EXISTS rebase_instructions(
+  id SERIAL PRIMARY KEY,
+  repo TEXT NOT NULL,
+  branch TEXT NOT NULL,
+  job_id TEXT,
+  target_main_sha TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'held',          -- held|delivered|done
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
