@@ -1,0 +1,40 @@
+#!/bin/sh
+# Thin pre-receive hook (DESIGN.md §3.2.1): ALL policy lives in the hub.
+# The hook streams the push lines to the supervisor's pre-receive endpoint
+# and rejects the push if the hub denies any line. Installed into every bare
+# repo by scripts/bootstrap-git.sh.
+#
+# Environment (set by nginx → fcgiwrap, not client-forgeable):
+#   REMOTE_USER  the validated git token
+#   HUB_INTERNAL_URL  hub base URL (default http://hub:8080)
+set -e
+HUB="${HUB_INTERNAL_URL:-https://hub:8080}"
+CACERT="${GIT_CA_CERT:-/data/git/ca/ca.crt}"
+REPO="$(basename "$(cd "$(dirname "$0")/.." && pwd)" .git)"
+
+# stdin lines: "<old-sha> <new-sha> <ref>" — build one JSON payload.
+payload='{"repo":"'"$REPO"'","token":"'"${REMOTE_USER:-}"'","pushes":['
+first=1
+while read -r old new ref; do
+  [ -n "$ref" ] || continue
+  if [ "$first" -eq 1 ]; then first=0; else payload="$payload,"; fi
+  payload="$payload{\"old\":\"$old\",\"new\":\"$new\",\"ref\":\"$ref\"}"
+done
+payload="$payload]}"
+
+resp="$(printf '%s' "$payload" | curl -sf --cacert "$CACERT" -X POST \
+  -H 'content-type: application/json' \
+  --data-binary @- \
+  "$HUB/internal/git/pre-receive")" || {
+  echo "pre-receive: hub unreachable — rejecting push" >&2
+  exit 1
+}
+
+allow="$(printf '%s' "$resp" | jq -r '.allow')"
+if [ "$allow" != "true" ]; then
+  printf '%s' "$resp" | jq -r '.messages[]?' | while IFS= read -r msg; do
+    echo "pre-receive: $msg" >&2
+  done
+  exit 1
+fi
+exit 0

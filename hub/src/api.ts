@@ -1,4 +1,5 @@
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer as createHttpServerRaw, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer as createHttpsServerRaw } from "node:https";
 import { readFileSync, existsSync } from "node:fs";
 import { join, dirname, extname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,6 +7,7 @@ import { pool } from "./db.ts";
 import { bus } from "./bus.ts";
 import { submitPlan, approvePlan, PlanError } from "./plans.ts";
 import { tick, LEASE_TTL_S, nodeMatches, resolveEscalation } from "./scheduler.ts";
+import { authenticateGit, preReceivePolicy, syncUpstream } from "./gitsvc.ts";
 
 /**
  * Hub HTTP API (DESIGN.md §3.2, §4). Pull-only hub-workers: workers call
@@ -51,12 +53,19 @@ function badProgressLine(ev: unknown): string | null {
   return null;
 }
 
-export function createHttpServer(): ReturnType<typeof createServer> {
-  return createServer(async (req, res) => {
+export function createHttpServer(): ReturnType<typeof createHttpServerRaw> {
+  const handler = async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     const route = `${req.method} ${url.pathname}`;
     try {
-      if (!authorized(req, url)) return json(res, 401, { error: "unauthorized" });
+      // /internal/git/{auth,pre-receive} are called by the gitserver only
+      // (compose-internal network) and validate the git token themselves —
+      // exempt from the API bearer token. /internal/git/sync keeps it.
+      const internalGit =
+        url.pathname === "/internal/git/auth" || url.pathname === "/internal/git/pre-receive";
+      if (!internalGit && !authorized(req, url)) {
+        return json(res, 401, { error: "unauthorized" });
+      }
 
       // ---------- health ----------
       if (route === "GET /api/health") return json(res, 200, { ok: true });
@@ -343,8 +352,47 @@ export function createHttpServer(): ReturnType<typeof createServer> {
         return json(res, 201, { ok: true });
       }
 
+      // ---------- internal git plane (R1; called by the gitserver) ----------
+      if (route === "GET /internal/git/auth") {
+        // nginx auth_request target: validate Basic git token for the repo.
+        // Semantics matter to git clients: NO credentials -> 401 (challenge;
+        // git sends credentials only after being challenged), invalid
+        // credentials -> 403.
+        const repo = String(req.headers["x-repo"] ?? "").replace(/\.git$/, "");
+        if (!req.headers.authorization) return json(res, 401, { error: "authentication required" });
+        const auth = authenticateGit(req.headers.authorization, repo);
+        if (!auth) return json(res, 403, { error: "forbidden" });
+        res.writeHead(204, {
+          "x-git-token": auth.token,
+          "x-git-role": auth.info.role,
+        });
+        return res.end();
+      }
+
+      if (route === "POST /internal/git/pre-receive") {
+        const body = JSON.parse((await readBody(req)).toString("utf8")) as {
+          repo?: string;
+          token?: string;
+          pushes?: Array<{ old: string; new: string; ref: string }>;
+        };
+        const info = body.token ? loadPolicySafe()[body.token] : undefined;
+        if (!info || !body.repo || !body.pushes?.length || !body.token) {
+          return json(res, 200, { allow: false, messages: ["invalid token or payload"] });
+        }
+        const verdict = preReceivePolicy(body.token, info, body.pushes);
+        return json(res, 200, verdict);
+      }
+
+      if (route === "POST /internal/git/sync") {
+        const body = JSON.parse((await readBody(req)).toString("utf8")) as { repo?: string };
+        if (!body.repo) return json(res, 400, { error: "repo required" });
+        const result = await syncUpstream(body.repo);
+        bus.publish("git", { kind: "upstream_sync", repo: body.repo, ...result });
+        return json(res, 200, result);
+      }
+
       // ---------- static dashboard (M6) ----------
-      if (req.method === "GET" && !url.pathname.startsWith("/api/")) {
+      if (req.method === "GET" && !url.pathname.startsWith("/api/") && !url.pathname.startsWith("/internal/")) {
         const publicDir = join(dirname(fileURLToPath(import.meta.url)), "..", "public");
         const rel = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
         const safe = rel.split("/").filter((p) => p && p !== "." && p !== "..").join("/");
@@ -366,5 +414,29 @@ export function createHttpServer(): ReturnType<typeof createServer> {
       const status = e instanceof PlanError ? 400 : 500;
       return json(res, status, { error: (e as Error).message });
     }
-  });
+  };
+
+  // TLS: serve the API/dashboard under the same internal CA as the gitserver
+  // when certs are mounted (compose sets TLS_CERT_PATH/TLS_KEY_PATH).
+  const certPath = process.env.TLS_CERT_PATH;
+  const keyPath = process.env.TLS_KEY_PATH;
+  if (certPath && keyPath && existsSync(certPath) && existsSync(keyPath)) {
+    const server = createHttpsServerRaw(
+      { cert: readFileSync(certPath), key: readFileSync(keyPath) },
+      handler,
+    );
+    console.log(`[hub] TLS enabled (${certPath})`);
+    return server;
+  }
+  return createHttpServerRaw(handler);
+}
+
+function loadPolicySafe(): Record<string, { role: string; node: string; repos: string[] }> {
+  try {
+    return (JSON.parse(readFileSync(process.env.POLICY_PATH ?? "/data/git/policy.json", "utf8")) as {
+      tokens: Record<string, { role: string; node: string; repos: string[] }>
+    }).tokens ?? {};
+  } catch {
+    return {};
+  }
 }

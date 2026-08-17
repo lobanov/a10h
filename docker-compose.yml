@@ -42,44 +42,84 @@ services:
       LOCAL_LLM_MODEL: ${LOCAL_LLM_MODEL:-gemma-4-26b-it}
       AUDITOR_MODEL: ${AUDITOR_MODEL:-local/gemma-4-26b-it}
       DIRECTOR_MODEL: ${DIRECTOR_MODEL:-z.ai/glm-5.3}
+      # Git plane (R1): bare repos + token policy served/read hub-side; hub API
+      # under the same internal CA as the gitserver.
+      REPOS_DIR: /data/repos
+      POLICY_PATH: /data/git/policy.json
+      TLS_CERT_PATH: /data/git/tls/hub.crt
+      TLS_KEY_PATH: /data/git/tls/hub.key
+      HF_STORE_PATH: /hf-store
     volumes:
       # Framework repo (contains examples/demo-project) — read-only reference.
       - ${PWD}:/repo:ro
+      # Git plane: bare repos (rw — merges/sync write), CA+policy+certs (ro).
+      - ./data/repos:/data/repos
+      - ./data/git:/data/git:ro
+      # HF artifact store (hub-side mount; workers share the same path).
+      - ./data/hf-store:/hf-store
     depends_on:
       postgres:
         condition: service_healthy
+
+  gitserver:
+    # Serves bare research repos over smart HTTPS (R1). Requires
+    # scripts/bootstrap-git.sh to have generated data/git/{ca,tls} and seeded
+    # data/repos/*.git.
+    build: ./gitserver
+    volumes:
+      - ./data/repos:/data/repos
+      - ./data/git:/data/git:ro
+    depends_on:
+      - hub
 
   worker-a:
     build: ./worker
     profiles: ["worker"]
     environment:
-      HUB_URL: http://hub:8080
+      HUB_URL: https://hub:8080
+      NODE_EXTRA_CA_CERTS: /data/git/ca/ca.crt
       NODE_ID: worker-a
       NODE_TAGS: ${NODE_A_TAGS:-cpu:8,mem:8G}
       REPO_PATH: /repo
       CHECKOUT_STRATEGY: clone
       WORK_DIR: /work
+      # Git plane (R1): clone/push via gitserver with CA trust + worker token.
+      GITSERVER_URL: https://gitserver
+      GIT_SSL_CAINFO: /data/git/ca/ca.crt
+      GIT_TOKEN_FILE: /data/git/tokens/worker-a.token
+      HF_STORE_PATH: /hf-store
     volumes:
       - ${PWD}:/repo:ro
       - ./data/work-a:/work
+      - ./data/git:/data/git:ro
+      - ./data/hf-store:/hf-store
     depends_on:
       - hub
+      - gitserver
 
   worker-b:
     build: ./worker
     profiles: ["worker"]
     environment:
-      HUB_URL: http://hub:8080
+      HUB_URL: https://hub:8080
+      NODE_EXTRA_CA_CERTS: /data/git/ca/ca.crt
       NODE_ID: worker-b
       NODE_TAGS: ${NODE_B_TAGS:-cpu:8,mem:8G}
       REPO_PATH: /repo
       CHECKOUT_STRATEGY: clone
       WORK_DIR: /work
+      GITSERVER_URL: https://gitserver
+      GIT_SSL_CAINFO: /data/git/ca/ca.crt
+      GIT_TOKEN_FILE: /data/git/tokens/worker-b.token
+      HF_STORE_PATH: /hf-store
     volumes:
       - ${PWD}:/repo:ro
       - ./data/work-b:/work
+      - ./data/git:/data/git:ro
+      - ./data/hf-store:/hf-store
     depends_on:
       - hub
+      - gitserver
 
   llamacpp:
     # Local auditor model (DESIGN.md §3.5 tier `local`). unsloth GGUF quants
