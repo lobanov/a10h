@@ -16,6 +16,7 @@ import { randomUUID } from "node:crypto";
 import { pool } from "./db.ts";
 import { bus } from "./bus.ts";
 import { nodeMatches } from "./scheduler.ts";
+import { handoffFor, logSecretary } from "./secretary.ts";
 
 export type InstructionKind =
   | "work_offer"
@@ -210,7 +211,11 @@ export async function offerJobToSession(
   if ((claimed.rowCount ?? 0) === 0) return null;
   const full = await pool.query(`SELECT * FROM jobs WHERE id = $1`, [jobId]);
   const job = full.rows[0];
-  return emitInstruction(sessionId, "work_offer", { job });
+  // R6: the secretary authors the work handoff (operational specifics the
+  // worker needs; director supplies commander's intent, never the reverse).
+  const handoff = handoffFor(job);
+  void logSecretary("handoff", { job_id: jobId, session: sessionId, handoff });
+  return emitInstruction(sessionId, "work_offer", { job, handoff });
 }
 
 /** A session refused its offer (one-task-per-container generation is done):

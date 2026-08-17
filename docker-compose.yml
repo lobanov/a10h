@@ -40,7 +40,8 @@ services:
       LOCAL_LLM_BASE_URL: ${LOCAL_LLM_BASE_URL:-}
       LOCAL_LLM_API_KEY: ${LOCAL_LLM_API_KEY:-}
       LOCAL_LLM_MODEL: ${LOCAL_LLM_MODEL:-gemma-4-26b-it}
-      AUDITOR_MODEL: ${AUDITOR_MODEL:-local/gemma-4-26b-it}
+      # R6: the secretary absorbed gate verification (v1 "auditor").
+      SECRETARY_MODEL: ${SECRETARY_MODEL:-${AUDITOR_MODEL:-local/gemma-4-26b-it}}
       DIRECTOR_MODEL: ${DIRECTOR_MODEL:-z.ai/glm-5.3}
       # Git plane (R1): bare repos + token policy served/read hub-side; hub API
       # under the same internal CA as the gitserver.

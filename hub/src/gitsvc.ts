@@ -12,9 +12,10 @@
  * - Upstream sync: fetch the GitHub/upstream remote and fast-forward main
  *   through the serialized per-repo writer (operator write path).
  */
-import { readFileSync, existsSync } from "node:fs";
-import { execFile } from "node:child_process";
+import { readFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { execFile, execFileSync } from "node:child_process";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { pool } from "./db.ts";
 import { bus } from "./bus.ts";
 
@@ -22,8 +23,12 @@ import { bus } from "./bus.ts";
 // back to ./data/repos relative to cwd when present.
 import { cwd } from "node:process";
 const HOST_REPOS = join(cwd(), "data/repos");
-const REPOS_DIR = process.env.REPOS_DIR ?? (existsSync(HOST_REPOS) ? HOST_REPOS : "/data/repos");
-const POLICY_PATH = process.env.POLICY_PATH ?? "/data/git/policy.json";
+// Lazy: env may be configured after module load (BDD BeforeAll sets
+// REPOS_DIR before importing the hub — but import hoisting can pull this
+// module in earlier via other paths).
+const reposRoot = (): string =>
+  process.env.REPOS_DIR ?? (existsSync(HOST_REPOS) ? HOST_REPOS : "/data/repos");
+const policyPath = (): string => process.env.POLICY_PATH ?? "/data/git/policy.json";
 
 export interface GitTokenInfo {
   role: string;
@@ -50,7 +55,7 @@ interface PolicyFile {
 /** Read the policy map; absent file = no tokens = everything denied. */
 export function loadPolicy(): PolicyFile {
   try {
-    const p = JSON.parse(readFileSync(POLICY_PATH, "utf8")) as PolicyFile;
+    const p = JSON.parse(readFileSync(policyPath(), "utf8")) as PolicyFile;
     if (p && typeof p === "object" && p.tokens) return p;
   } catch {
     /* fallthrough */
@@ -60,7 +65,7 @@ export function loadPolicy(): PolicyFile {
 
 export function repoDir(repo: string): string {
   if (!/^[a-zA-Z0-9._-]+$/.test(repo)) throw new Error("invalid repo name");
-  return join(REPOS_DIR, `${repo}.git`);
+  return join(reposRoot(), `${repo}.git`);
 }
 
 /** Parse a Basic authorization header → [user, pass]. */
@@ -274,7 +279,7 @@ export interface LandingResult {
   instruction?: { id: number; target_main_sha: string; fresh: boolean };
 }
 
-const LANDING_STALL_S = Number(process.env.LANDING_STALL_TIMEOUT_S ?? 600);
+const LANDING_STALL_S = Number(process.env.LANDING_STALL_TIMEOUT_S ?? 120);
 
 /**
  * Landing turn (serialized per repo): ff-merge the task branch into main; if
@@ -487,6 +492,53 @@ export async function pathExistsAt(repo: string, sha: string, path: string): Pro
   }
 }
 
+/**
+ * R6: hub-side mechanical rebase (DESIGN §3.2.1 fallback — task branches are
+ * file-disjoint, conflicts are rare and fall back to the stall/escalation
+ * path). Replays the branch onto main in a temp clone and moves the ref
+ * directly (the hub owns the repo; no hook/grant needed for update-ref).
+ */
+export async function hubRebase(
+  repo: string,
+  branch: string,
+): Promise<{ ok: boolean; sha?: string; detail?: string }> {
+  return withRepoLock(repo, async () => {
+    const gitDir = repoDir(repo);
+    const wt = mkdtempSync(join(tmpdir(), "hub-rebase-"));
+    try {
+      let r = sh0("git", ["clone", "-q", "--no-hardlinks", gitDir, wt]);
+      if (r.code !== 0) return { ok: false, detail: "clone failed" };
+      r = sh0("git", ["fetch", "-q", "origin", branch], { cwd: wt });
+      if (r.code !== 0) return { ok: false, detail: "fetch branch failed" };
+      r = sh0("git", ["checkout", "-q", "-B", "work", "FETCH_HEAD"], { cwd: wt });
+      if (r.code !== 0) return { ok: false, detail: "checkout failed" };
+      r = sh0("git", ["rebase", "origin/main"], { cwd: wt });
+      if (r.code !== 0) {
+        sh0("git", ["rebase", "--abort"], { cwd: wt });
+        return { ok: false, detail: "conflict" };
+      }
+      const sha = sh0("git", ["rev-parse", "HEAD"], { cwd: wt }).stdout.trim();
+      const f = sh0("git", ["--git-dir", gitDir, "fetch", "-q", wt, "HEAD"]);
+      if (f.code !== 0) return { ok: false, detail: "fetch back failed" };
+      const u = sh0("git", ["--git-dir", gitDir, "update-ref", branch, sha]);
+      if (u.code !== 0) return { ok: false, detail: "update-ref failed" };
+      bus.publish("git", { kind: "hub_rebase", repo, branch, sha });
+      return { ok: true, sha };
+    } finally {
+      rmSync(wt, { recursive: true, force: true });
+    }
+  });
+}
+
+function sh0(cmd: string, args: string[], opts: { cwd?: string } = {}): { code: number; stdout: string; stderr: string } {
+  try {
+    const stdout = execFileSync(cmd, args, { cwd: opts.cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    return { code: 0, stdout, stderr: "" };
+  } catch (e: any) {
+    return { code: e.status ?? 1, stdout: e.stdout ?? "", stderr: e.stderr ?? e.message };
+  }
+}
+
 export async function gitIsAncestor(repo: string, ancestor: string, descendant: string): Promise<boolean> {
   try {
     await git(repoDir(repo), ["merge-base", "--is-ancestor", ancestor, descendant]);
@@ -497,9 +549,9 @@ export async function gitIsAncestor(repo: string, ancestor: string, descendant: 
 }
 
 export function reposDir(): string {
-  return REPOS_DIR;
+  return reposRoot();
 }
 
 export function policyExists(): boolean {
-  return existsSync(POLICY_PATH);
+  return existsSync(policyPath());
 }

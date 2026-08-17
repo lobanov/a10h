@@ -12,7 +12,7 @@ async function main(): Promise<void> {
   await migrate();
   const cfg = agentConfig();
   console.log(
-    `[hub] agents ${cfg.enabled ? `enabled (auditor=${cfg.auditorModel}, director=${cfg.directorModel})` : `DISABLED: ${cfg.reason}`}`,
+    `[hub] agents ${cfg.enabled ? `enabled (secretary=${cfg.secretaryModel}, director=${cfg.directorModel})` : `DISABLED: ${cfg.reason}`}`,
   );
   const server = createHttpServer();
   server.listen(PORT, () => console.log(`[hub] listening on :${PORT}`));

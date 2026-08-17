@@ -32,7 +32,7 @@ function pi(): Promise<any> {
 export interface AgentConfig {
   enabled: boolean;
   reason?: string;
-  auditorModel: string;
+  secretaryModel: string;
   directorModel: string;
   modelsPath: string | null;
 }
@@ -73,7 +73,8 @@ export function agentConfig(): AgentConfig {
   config = {
     enabled: hasAny,
     reason: hasAny ? undefined : "no provider configured (set Z_AI_API_KEY or LOCAL_LLM_BASE_URL)",
-    auditorModel: process.env.AUDITOR_MODEL ?? "local/gemma-4-26b-it",
+    // R6: the secretary absorbed gate verification (v1 "auditor").
+    secretaryModel: process.env.SECRETARY_MODEL ?? process.env.AUDITOR_MODEL ?? "local/gemma-4-26b-it",
     directorModel: process.env.DIRECTOR_MODEL ?? "z.ai/glm-5.3",
     modelsPath,
   };
@@ -132,7 +133,7 @@ function enqueue<T>(role: string, task: () => Promise<T>): Promise<T> {
 }
 
 async function runAgentTurn(opts: {
-  role: "auditor" | "director";
+  role: "secretary" | "director";
   model: string;
   systemPrompt: string;
   userPrompt: string;
@@ -193,8 +194,13 @@ async function runAgentTurn(opts: {
   return captured;
 }
 
-/** Auditor: reasonableness pass over a completed gate evaluation. */
-export async function queueAudit(input: {
+/**
+ * Secretary — gate verification (R6): a FORMAL submission check over a
+ * completed gate evaluation. Criteria met, claims evidenced and reasonable.
+ * This is NOT adversarial research review (that is commissioned as ordinary
+ * tasks, never a secretary duty) and NEVER evaluates research direction.
+ */
+export async function queueVerification(input: {
   gateResultId: number;
   plan_id: string;
   activity: string;
@@ -208,21 +214,22 @@ export async function queueAudit(input: {
     .map((e) => `--- ${e.path} ---\n${(e.content ?? "").slice(0, 2000)}`)
     .join("\n");
   const checksText = input.checks.map((c) => `- ${c.id}: ${c.ok ? "PASS" : "FAIL"} (${c.detail})`).join("\n");
-  const result = await enqueue("auditor", () =>
+  const result = await enqueue("secretary", () =>
     runAgentTurn({
-      role: "auditor",
-      model: cfg.auditorModel,
+      role: "secretary",
+      model: cfg.secretaryModel,
     systemPrompt:
-      "You are the research lab's auditor agent. You verify that gate outcomes are evidenced and reasonable. " +
+      "You are the research lab's secretary agent performing FORMAL gate verification: check that submission criteria are met and claims are evidenced and reasonable. " +
       "You must call the tool record_audit exactly once with {verdict, note}. " +
       "verdict is one of: agree_pass, agree_fail, dispute. " +
-      "note references the evidence: say what supports or undermines the claims. Be skeptical of suspiciously smooth numbers, missing seeds, or claims the evidence does not support.",
+      "note references the evidence: say what supports or undermines the claims. Be skeptical of suspiciously smooth numbers, missing seeds, or claims the evidence does not support. " +
+      "You do NOT perform adversarial research review and you never judge research direction — formal submission criteria only.",
     userPrompt:
       `Gate result for activity "${input.activity}" (plan ${input.plan_id}, job ${input.job_id}).\n` +
       `Mechanical verdict: ${input.verdict}\nMechanical checks:\n${checksText}\n\nEvidence files:\n${evidenceText || "(none)"}\n\n` +
       `Call record_audit with your independent judgment.`,
       toolName: "record_audit",
-      toolDescription: "Record the auditor's verdict and evidence-referenced note.",
+      toolDescription: "Record the secretary's verification verdict and evidence-referenced note.",
       timeoutMs: 180_000,
     }),
   );
@@ -231,7 +238,7 @@ export async function queueAudit(input: {
       JSON.stringify(result),
       input.gateResultId,
     ]);
-    await logAgent("auditor", "audit_recorded", {
+    await logAgent("secretary", "verification_recorded", {
       gate_result_id: input.gateResultId,
       activity: input.activity,
       verdict: result.verdict,

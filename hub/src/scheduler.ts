@@ -1,7 +1,8 @@
 import { pool } from "./db.ts";
 import { bus } from "./bus.ts";
 import { evaluateCriteria, type Criterion, type EvidenceFile } from "./gates.ts";
-import { queueAudit, queueDirector, agentConfig } from "./agents.ts";
+import { queueVerification, queueDirector, agentConfig } from "./agents.ts";
+import { handoffFor, commitAttemptNote, logSecretary } from "./secretary.ts";
 import {
   createTaskBranch,
   landBranch,
@@ -11,6 +12,7 @@ import {
   taskRef as taskRefOf,
   gitRevParse,
   gitIsAncestor,
+  hubRebase,
 } from "./gitsvc.ts";
 import {
   offerJobToSession,
@@ -248,19 +250,27 @@ async function maybeEmitRebaseInstruction(
       "landing stalled: rebase rounds exhausted");
     return;
   }
-  if (!result.instruction?.fresh) return;
   const nodeRow = jobId
     ? await pool.query(`SELECT node FROM jobs WHERE id = $1`, [jobId])
     : { rows: [] as Array<{ node?: string }> };
   const node = nodeRow.rows[0]?.node as string | undefined;
   const session = node ? await sessionForNode(node) : null;
-  if (session) {
+  if (session && result.instruction?.fresh) {
     await emitInstruction(session, "rebase", {
       repo,
       branch,
-      target_main_sha: result.instruction.target_main_sha,
+      target_main_sha: result.instruction!.target_main_sha,
       job_id: jobId,
     });
+    return;
+  }
+  // No live worker (generation exited) or within the stall window: hub-side
+  // mechanical rebase (DESIGN §3.2.1 fallback; file-disjoint tasks).
+  if (!session) {
+    const rb = await hubRebase(repo, branch);
+    if (!rb.ok && rb.detail !== "conflict") {
+      // transient failure — the stall window retries
+    }
   }
 }
 
@@ -488,7 +498,7 @@ export async function runGateEvaluation(job: {
   }
 
   // Auditor agent reviews every gate outcome (reasonableness pass, M5).
-  void queueAudit({ gateResultId, plan_id: job.plan_id, activity: job.activity, job_id: job.id, verdict, checks, evidence });
+  void queueVerification({ gateResultId, plan_id: job.plan_id, activity: job.activity, job_id: job.id, verdict, checks, evidence });
 }
 
 async function createEscalation(
@@ -664,6 +674,43 @@ async function landVerifiedActivities(): Promise<void> {
       console.error(`[scheduler] landing ${key} failed:`, (e as Error).message);
     }
   }
+  // R6 secretary retention: a summary note on main for every closed attempt
+  // (merged or failed/resolved), once per attempt. Notes go through the
+  // serialized per-repo writer (fetch + ff update-ref — no transport hooks).
+  {
+    const closed = await pool.query(
+      `SELECT a.plan_id, a.id AS activity, a.attempt, a.job_id, a.merged_sha, p.repo, a.status
+       FROM activities a JOIN plans p ON p.id = a.plan_id
+       WHERE a.status IN ('passed','resolved','failed_final','escalated')
+         AND NOT EXISTS (
+           SELECT 1 FROM artifacts n
+           WHERE n.job_id = a.job_id AND n.kind = 'note' AND n.path LIKE 'notes/%'
+         )`,
+    );
+    for (const row of closed.rows) {
+      const merged = row.merged_sha !== null;
+      if (row.status === "passed" && !merged) continue; // note waits for the merge
+      const branch = taskRefOf(row.plan_id, row.activity);
+      const tip = await gitRevParse(row.repo ?? "demo", branch);
+      const note = await commitAttemptNote({
+        repo: row.repo ?? "demo",
+        planId: row.plan_id,
+        activity: row.activity,
+        attempt: row.attempt,
+        outcome: merged ? "merged" : (row.status as "failed_final" | "resolved" | "escalated"),
+        branch,
+        tip,
+        detail: `activity ${row.status}`,
+      });
+      if (note.committed) {
+        await pool.query(
+          `INSERT INTO artifacts (job_id, kind, path, commit_sha) VALUES ($1, 'note', $2, $3)`,
+          [row.job_id, note.note_path, note.main],
+        ).catch(() => undefined);
+      }
+    }
+  }
+
   // Generation release sweeper: a live busy session whose node has NO work
   // pending (no offered/leased/running jobs) and served its task will never
   // receive another instruction for this container generation — release it

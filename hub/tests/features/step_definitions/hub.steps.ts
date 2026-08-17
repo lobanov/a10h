@@ -378,6 +378,7 @@ let r2: {
   landedTip: string;
   heldBranch: string;
   last: { allow: boolean; messages: string[] } | null;
+  lastOffer?: { handoff?: any; job?: any };
 } = { jobId: "", landedTip: "", heldBranch: "", last: null };
 
 async function submitAndPromote(acts: string[]): Promise<string> {
@@ -406,9 +407,11 @@ async function preReceive(
   node: string,
   pushes: Array<{ old: string; new: string; ref: string }>,
 ): Promise<{ allow: boolean; messages: string[] }> {
+  const payload = { repo: "demo", token: tokens[node], pushes };
+  if (!tokens[node]) console.log("NO TOKEN for", node, "known:", Object.keys(tokens));
   const res = await api("/internal/git/pre-receive", {
     method: "POST",
-    body: JSON.stringify({ repo: "demo", token: tokens[node], pushes }),
+    body: JSON.stringify(payload),
   });
   assert.ok(res.ok, `pre-receive failed: ${res.status}`);
   return res.json();
@@ -539,17 +542,35 @@ Then("the push is accepted", function () {
 
 Then("main in the bare repo equals the {string} tip", function (refArg: string) {
   const ref = refArg.endsWith("/alpha") && refArg.startsWith("refs/tasks/") ? tref("alpha") : refArg;
-  assert.equal(bare(["rev-parse", "main"]), bare(["rev-parse", ref]));
+  // After merge + secretary retention, main = merge (+ note commit on top):
+  // the branch tip must be CONTAINED in main's history.
+  const merged = (() => {
+    try {
+      execFileSync("git", ["--git-dir", join(reposDir, "demo.git"), "merge-base", "--is-ancestor", bare(["rev-parse", ref]), "main"], { stdio: "ignore" });
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+  assert.ok(merged, `branch tip not merged into main`);
 });
 
 Then("main in the bare repo has advanced to exactly one branch tip", async function () {
   const main = bare(["rev-parse", "main"]);
   const alphaTip = bare(["rev-parse", tref("alpha")]);
   const betaTip = bare(["rev-parse", tref("beta")]);
-  const landed = [alphaTip, betaTip].filter((t) => t === main);
+  const contains = (tip: string) => {
+    try {
+      execFileSync("git", ["--git-dir", join(reposDir, "demo.git"), "merge-base", "--is-ancestor", tip, "main"], { stdio: "ignore" });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const landed = [alphaTip, betaTip].filter(contains);
   assert.equal(landed.length, 1, `main=${main} alpha=${alphaTip} beta=${betaTip}`);
   r2.landedTip = main;
-  r2.heldBranch = main === alphaTip ? tref("beta") : tref("alpha");
+  r2.heldBranch = contains(alphaTip) ? tref("beta") : tref("alpha");
 });
 
 Then("exactly one rebase instruction exists for the other branch", async function () {
@@ -566,4 +587,66 @@ Then("a one-time force authorization is available for the other branch", async f
     [r2.heldBranch],
   );
   assert.ok(rows.rows.length >= 1, "no unconsumed grant");
+});
+
+// ---------- R6 secretary steps (secretary.feature) ----------
+import { handoffFor } from "../../../src/secretary.ts";
+import { readFileSync as _rf } from "node:fs";
+
+When("the job's offer is fetched from the instruction outbox", async function () {
+  const ob = await hubMod.pool.query(
+    `SELECT payload FROM instruction_outbox WHERE kind = 'work_offer' ORDER BY id DESC LIMIT 1`,
+  );
+  assert.ok(ob.rows.length > 0, "no work_offer in outbox");
+  r2.lastOffer = ob.rows[0].payload;
+});
+
+Then("the offer payload carries handoff with branch and artifact paths", function () {
+  const h = r2.lastOffer?.handoff;
+  assert.ok(h, "no handoff on offer payload");
+  assert.equal(h.role, "secretary");
+  assert.match(h.branch, /refs\/tasks\//);
+  assert.ok(Array.isArray(h.artifact_paths?.evidence), "no artifact paths");
+  assert.ok(Array.isArray(h.follow_ups) && h.follow_ups.length > 0, "no follow-ups");
+});
+
+Then("the handoff constraints forbid deciding research direction", function () {
+  const c: string[] = r2.lastOffer?.handoff?.constraints ?? [];
+  assert.ok(
+    c.some((x) => x.includes("never decide research direction")),
+    `constraints missing the rule: ${JSON.stringify(c)}`,
+  );
+});
+
+Then("the verification note is recorded under the secretary role", async function () {
+  const rows = await hubMod.pool.query(
+    `SELECT role FROM agent_log WHERE event IN ('verification_recorded','skipped_disabled') ORDER BY id DESC LIMIT 1`,
+  );
+  assert.equal(rows.rows[0]?.role, "secretary", "verification not recorded by the secretary");
+});
+
+When("the scheduler lands verified activities and runs retention", async function () {
+  await hubMod.tick();
+  await hubMod.tick();
+});
+
+Then("main in the bare repo contains an attempt note referencing the task branch", function () {
+  const files = bare(["ls-tree", "-r", "--name-only", "main"]);
+  const note = files.split("\n").find((f) => f.startsWith("notes/") && f.endsWith(".md"));
+  assert.ok(note, `no note on main:\n${files}`);
+  const content = bare(["show", `main:${note}`]);
+  assert.ok(content.includes(tref("alpha")), "note does not reference the task branch");
+  assert.ok(content.includes("attempt"), "note lacks attempt info");
+});
+
+Then("the framework secretary skill forbids deciding research direction", function () {
+  const skillPath = join(dirname(fileURLToPath(import.meta.url)), "../../../../skills/secretary/SKILL.md");
+  const skill = readFileSync(skillPath, "utf8");
+  assert.ok(/never decide research direction/i.test(skill), "skill missing the constraint");
+});
+
+Then("the framework secretary skill forbids adversarial review", function () {
+  const skillPath = join(dirname(fileURLToPath(import.meta.url)), "../../../../skills/secretary/SKILL.md");
+  const skill = readFileSync(skillPath, "utf8");
+  assert.ok(/never perform adversarial research review/i.test(skill), "skill missing the constraint");
 });
