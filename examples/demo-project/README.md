@@ -29,11 +29,11 @@ examples/demo-project/
 │   ├── simulate_training.py   ← simulated training run (protocol-conformant)
 │   ├── analyze_results.py     ← simulated analysis job (protocol-conformant)
 │   └── README.md        ← how these jobs satisfy the protocol
-├── skills/              ← agent skills, versioned in this repo
-│   ├── worker-researcher/SKILL.md
-│   ├── auditor/SKILL.md
-│   ├── reflector/SKILL.md
-│   └── secretary/SKILL.md
+├── skills/              ← worker-task skills, versioned in this repo
+│   └── demo/SKILL.md    ← task-specific skill: how to run this demo's jobs
+│                            and produce gate-passing evidence
+│                         (role-shaping skills — auditor/reflector/secretary —
+│                          are framework-side; DESIGN.md §3.4)
 ├── config/
 │   └── project.yaml     ← per-project config: model tiers, role→model mapping
 └── runs/                ← outputs (created at runtime; gitignored)
@@ -86,9 +86,9 @@ This is the artifact shape the **auditor** would reject at the `baseline-gate` (
 
 ### Part D — Trace the governance story (10 min)
 
-1. Open `skills/auditor/SKILL.md` — see exactly how the auditor evaluates `baseline-gate` (read `metrics.json`, verify criteria, check evidence is *reasonable*, not just present).
-2. Open `skills/worker-researcher/SKILL.md` — see the retrospective template every worker fills at exit.
-3. Open `skills/reflector/SKILL.md` — see how retrospectives + audit anomalies become skill/plan proposals.
+1. Open `plan/graph.yaml` → `baseline-gate` — see the exact criteria the auditor evaluates mechanically (job state, `final_loss < 0.5`, `seed` + `config_hash` present).
+2. Open `skills/demo/SKILL.md` — the task-specific worker skill: evidence before claims, the exit bundle, the retrospective shape, repair/escalation behavior.
+3. Open `DESIGN.md` §5 — the role roster and governance flows (how retrospectives + audit anomalies become reflector proposals; how role behavior is shaped framework-side).
 
 ### Part E — Full stack (deployed framework, ~10 min)
 
@@ -132,7 +132,7 @@ agents on instead).
 - **Simulated, dependency-free jobs** prove the protocol is *stack-agnostic*: nothing here imports ML frameworks. Real projects replace job bodies; the contract stays.
 - **Evidence-first:** every job writes `metrics.json` before claiming success — auditor checks are mechanical, not vibes.
 - **The sabotage path is intentional:** a demo where nothing fails validates nothing about repair loops.
-- **Skills are content, not code:** they demonstrate that research know-how lives in versioned repo artifacts the reflector can evolve.
+- **Skills are content, not code:** the demo's task skill (`skills/demo/`) demonstrates that task know-how lives in versioned repo artifacts; role-shaping skills live framework-side (DESIGN.md §3.4) and evolve through the same governance.
 
 ## Troubleshooting
 

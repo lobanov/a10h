@@ -31,7 +31,6 @@ activities:
         - id: reproducible
           check: {type: evidence_fields, file: metrics.json, fields: [seed, config_hash]}
       evidence: [runs/baseline/metrics.json]
-      auditor_skill: skills/auditor/SKILL.md
 
   variant-a:
     title: "Train curriculum variant A (easy→hard)"

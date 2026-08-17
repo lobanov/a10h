@@ -135,7 +135,8 @@ Source: DESIGN.md v1.1 (§3.2.1 git plane, §3.3 state model, §3.4 skills, §4 
 
 ### R7 — Demo seeding + validation rework
 - [ ] Bootstrap seeds `data/repos/demo.git` from `examples/demo-project`; framework repo no longer mounted to workers
-- [ ] Migrate role-shaping skills (auditor/reflector/secretary) from `examples/demo-project/skills/` to framework `skills/`; demo project keeps only worker-task-specific skills
+- [x] Demo project carries only the task-specific worker skill (`skills/demo/`); role-shaping skills (auditor/reflector/secretary) removed from the project repo
+- [ ] Author framework-side role-shaping skills (`skills/auditor/`, `skills/reflector/` — secretary skill in R6): hub-side personas never live in project repos
 - [ ] e2e rework — new git-plane checks: task branch pre-created; push denied to wrong refs; audited-complete merge lands on main; failed repair preserved + summary note committed; rebase path exercised (concurrent fixture)
 - [ ] Worker BDD: SSE-instruction + session-lifecycle scenarios; hub BDD: hook/merge scenarios (R2)
 - [ ] Skill (`autoresearch-e2e`) + incidents log extended for the new stack (gitserver, CA, sessions, exit-after-task)

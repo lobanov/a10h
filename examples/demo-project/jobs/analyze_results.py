@@ -32,7 +32,7 @@ def load_evidence(run_dir):
             raise SystemExit(f"[analyze_results] invalid evidence in {path}: missing {key!r}")
     if m.get("succeeded") is False:
         # Evidence from a FAILED run must not feed conclusions — this is the
-        # evidence-first rule the auditor enforces (skills/auditor/SKILL.md).
+        # evidence-first rule the auditor enforces (DESIGN.md §5.2).
         raise SystemExit(f"[analyze_results] refusing failed evidence in {path}: "
                          f"variant={m['variant']} final_loss={m['final_loss']}")
     return m

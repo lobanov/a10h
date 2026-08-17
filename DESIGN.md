@@ -107,7 +107,7 @@ The hub serves research project repos over **HTTPS** via a lean **gitserver side
 - **Framework repo (this repo, public):** compose stack, supervisor, extensions, dashboard, protocol specs, demo. `git clone && docker-compose up` bootstraps the lab.
 - **Project repo (per research project, private/public case-by-case):** goal, planning graphs, experiment code, task-specific worker skills, artifacts. Served by the hub's gitserver; workers do a **full in-container checkout per task** (clone from the gitserver URL with CA + token; checkout the task branch; delete on task end). **No worktrees; no `/repo` bind mount on workers.**
 - Skills are versioned repo artifacts: agents propose skill edits; changes land via the same gate/audit/approval flow as any other work, are auditable in git history, and can be **A/B-tested on identical inputs** (branch-based A/B — two task-style checkouts; worker worktrees are removed by R3) when the director or human decides.
-- **Skill placement:** role-shaping skills (auditor, reflector, secretary personas — hub-side role concerns) live in the **framework repo**; project repos carry only **worker-task-specific skills**. (The demo project's role skills migrate to framework level in R7.)
+- **Skill placement:** role-shaping skills (auditor, reflector, secretary personas — hub-side role concerns) live in the **framework repo**; project repos carry only **worker-task-specific skills** (the demo carries a single one: `skills/demo/`). Role-shaping skills are authored framework-side — secretary in R6, auditor/reflector in R7.
 
 ### 3.5 Hybrid inference + model tiers
 
@@ -141,7 +141,7 @@ The hub serves research project repos over **HTTPS** via a lean **gitserver side
 | **Secretary** | small/mid | **Shapes the work handoff:** operationalizes director intent into worker-facing specifics (artifact paths/refs, follow-up requests — retrospective prompts, summarize-work requests, archiving instructions) and **executes** them; retention executor (preserve branch + note to main); taxonomies/indices/lineage | Decide research direction |
 | **Reflector** | strong | Cross-campaign reflection: proposes changes to plans and **skills** from accumulated retrospectives/audits | Apply changes directly |
 
-*Implementation status:* director + auditor are live (`hub/src/agents.ts`). Secretary (R6) and reflector (M9) are designed; role-shaping skills live framework-side (`skills/` — migrated in R7).
+*Implementation status:* director + auditor are live (`hub/src/agents.ts`). Secretary (R6) and reflector (M9) are designed; role-shaping skills will be authored framework-side (`skills/` — secretary in R6, auditor/reflector in R7).
 
 ### 5.2 Governance flows
 
