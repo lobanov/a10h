@@ -159,6 +159,8 @@ Source: DESIGN.md v1.1 (§3.2.1 git plane, §3.3 state model, §3.4 skills, §4 
 
 **Acceptance:** ✅ full e2e green on the deployed R-stack — `e2e-demo.mjs` ALL CHECKS PASSED including the six new git-plane checks; hub BDD 21/21 (100+ steps); worker BDD 12/12; `e2e-gitplane.mjs` 23/23; demo quick-start (Part E) updated and exercised; skill + incidents extended.
 
+**Independent review (glm-5.3, post-build):** 8 major / 9 minor — all 8 majors + m1/m2/m4/m5/m6/m8/m9 fixed and re-validated (denial check pins the POLICY message — TLS/clone failures now FAIL the check; retrospective + summary asserted from committed state; the gates-reviewed check counts only REAL secretary turns — mechanical-fallback notes excluded; merge + note convergence polled to 8 min with non-degenerate tip≠base assertion; dashboard `api()` auth-token URL bug fixed — verified live 401/200 with AUTH_TOKEN set; role-shaping skills baked into the hub image and loaded into the verification session prompt (single source of truth — no paraphrase drift); README/DESIGN status truths (R-series built, MIT license, gitserver in the stack, bootstrap+TLS quick-start); skill runbook reconciled (TLS everywhere, full TRUNCATE list incl. session tables, SECRETARY_MODEL). Deferred (documented): m3 upstream-sync trigger wiring (manual endpoint only), m7 partial role-name cleanup in old incident titles.)
+
 ---
 
 ## M7 — Dashboard: approvals & gates UX polish

@@ -1,6 +1,6 @@
 # Pi Autoresearch Lab — Design Doc
 
-**Status:** v1.1 — implemented alpha + refinement design (R-series, see PLAN.md). Live: job plane, governance plane, director agent + gate verification (v1 "auditor" implementation; folds into the secretary in R6), dashboard ops+approvals, subprocess workloads. Designed (R1–R7): hub-served git plane with task branches + verified-complete merges, SSE worker-agent instruction protocol, exit-after-task workers, the secretary (work handoff + gate verification). This document records **decisions and architecture**; operational and protocol detail lives in [`protocols/README.md`](protocols/README.md) and the `.agents/skills/autoresearch-e2e/` skill.
+**Status:** v1.1 — implemented alpha: M1–M6 AND the R1–R7 refinement series are BUILT and validated (see PLAN.md). Live: job plane, governance plane, director agent + gate verification (v1 "auditor" implementation; folds into the secretary in R6), dashboard ops+approvals, subprocess workloads. Built and validated (R1–R7): hub-served git plane with task branches + verified-complete merges, SSE worker-agent instruction protocol, one-task-per-container workers, the secretary (work handoff + gate verification + retention). This document records **decisions and architecture**; operational and protocol detail lives in [`protocols/README.md`](protocols/README.md) and the `.agents/skills/autoresearch-e2e/` skill.
 **Repo role:** This is the *framework repo* — the multi-agent system itself. Research content lives in separate project repos (served by the hub's gitserver; see §3.2.1 Git plane).
 
 ---
@@ -84,7 +84,7 @@ A multi-agent system (MAS) that operates a research lab for **experimental resea
 - Resilience model: **leases with heartbeats; lease expiry re-queues** (bounded attempts, then the activity escalates); SSE consumers resume from the last event id (dashboard stream). Exact semantics are normative in [`protocols/README.md`](protocols/README.md) §4 — verified behaviors, not aspirations.
 - Multi-node is a **v1 requirement**, exercised by the demo (two worker containers on one host); true cross-host join — CA/token distribution over the network — is first exercised in P4.
 
-### 3.2.1 Git plane (R1–R3, designed)
+### 3.2.1 Git plane (R1–R3, built)
 
 The hub serves research project repos over **HTTPS** via a lean **gitserver sidecar**: nginx + git-http-backend (fcgiwrap), bare repos on a hub volume (`data/repos/*.git`), smart HTTP. TLS terminates with a server certificate from a **bare-bones internal CA** (hub-generated at bootstrap; the CA cert is distributed to workers, `http.sslCAInfo`). Workers authenticate with **hub-issued tokens**; the hub maintains the policy mapping jobs → allowed refs → tokens.
 
@@ -144,7 +144,7 @@ The hub serves research project repos over **HTTPS** via a lean **gitserver side
 
 *Verification, not adversarial review:* gate verification checks **formal submission criteria** (criteria met, claims evidenced and reasonable) — it is not an adversarial research review, and **adversarial review is not a framework role**: whether and when workers or the director do it (solicited or not) is **project-specific**; commissioned reviews simply run as ordinary tasks through the same gates.
 
-*Implementation status:* director + gate verification are live (`hub/src/agents.ts` — the verification agent is named "auditor" in the v1 code; it folds into the secretary at R6). Secretary (R6) and reflector (M9) are designed; role-shaping skills will be authored framework-side (`skills/` — secretary in R6, reflector in R7).
+*Implementation status:* director + secretary (gate verification — absorbed the v1 "auditor"; `hub/src/agents.ts`, `hub/src/secretary.ts`) are live; their role-shaping skills live framework-side (`skills/secretary/`, loaded into the session prompt). Reflector (M9) is designed; its skill ships framework-side (`skills/reflector/`).
 
 ### 5.2 Governance flows
 
@@ -196,7 +196,7 @@ Design-level contract summary:
 - **Ad hoc chat (M8, planned):** talk to any agent role about ongoing work, backed by pi sessions via the supervisor's chat bridge.
 - Single-user, token auth (`AUTH_TOKEN`). DAG visualization: future.
 
-## 7.1 SSE worker-agent instruction protocol (R4, designed)
+## 7.1 SSE worker-agent instruction protocol (R4, built)
 
 All **hub-initiated worker instructions** are SSE events — one standard channel for everything the hub pushes to worker agents:
 

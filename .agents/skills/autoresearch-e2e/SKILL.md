@@ -8,9 +8,11 @@ compatibility: Requires docker + compose v2, node 22+, this repo deployed per do
 # Autoresearch E2E — configure, run, troubleshoot
 
 Paths below are relative to the repo root (`~/autoresearch`). "Green" means
-`node scripts/e2e-demo.mjs` prints **`ALL CHECKS PASSED`** (20 checks:
-approval blocking, 2-worker scheduling, gate pass/fail, repair→escalation
-with director note, auditor audits, schema-valid artifacts, plan done).
+`node scripts/e2e-demo.mjs` prints **`ALL CHECKS PASSED`** (the run prints ALL CHECKS PASSED: approval blocking, SSE-offered scheduling
+to both workers, gate pass/fail on COMMITTED evidence, verified-complete
+merges to main, repair→escalation with director note, secretary verification
+turns, retrospectives + attempt notes on main, main-push policy denial,
+plan done).
 
 ## 0. Git plane first (R-series stack)
 
@@ -28,7 +30,7 @@ file mounts (never the whole data/git tree).
 ```bash
 cp .env.example .env
 # REQUIRED for director agent notes: Z_AI_API_KEY=... (remote GLM-5.3)
-# Auditor runs local by default (AUDITOR_MODEL=local/gemma-4-26b-it).
+# Auditor runs local by default (SECRETARY_MODEL=local/gemma-4-26b-it).
 
 ./scripts/fetch-models.sh        # 15.8 GB GGUF → data/vllm-models/model/ (~9 min)
 docker compose up -d postgres hub
@@ -54,12 +56,12 @@ Model facts (do not rediscover):
 ```bash
 # Clean state between runs (stale plans/escalations confuse assertions):
 docker exec autoresearch-postgres-1 psql -U autoresearch -d autoresearch \
-  -c "TRUNCATE nodes, jobs, job_events, artifacts, plans, activities, gate_results, approvals, agent_log;"
+  -c "TRUNCATE nodes, jobs, job_events, artifacts, plans, activities, gate_results, approvals, agent_log, worker_sessions, instruction_outbox, rebase_instructions, git_force_auth;"
 
 # ALWAYS run in background and poll — agent turns (serialized, local model
 # ~24 s/audit, director on GLM-5.3) make the full run take 3–5+ minutes,
 # which can exceed tool timeouts if run in the foreground:
-nohup node scripts/e2e-demo.mjs http://localhost:8080 > /tmp/e2e.log 2>&1 &
+nohup node scripts/e2e-demo.mjs https://localhost:8080 > /tmp/e2e.log 2>&1 &
 ```
 
 Monitor (never assume; always look):

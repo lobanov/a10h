@@ -1,0 +1,5 @@
+data/
+hub/node_modules/
+worker/node_modules/
+.git/
+node_modules/

@@ -10,11 +10,14 @@ RUN apt-get update \
   && git config --system --add safe.directory '*'
 
 WORKDIR /app
-COPY package.json package-lock.json* ./
+# Build context is the REPO ROOT (compose) so framework-side skills/ can be
+# baked in (role-shaping skills load into agent session prompts).
+COPY hub/package.json hub/package-lock.json* ./
 RUN npm install --omit=dev && rm -rf ~/.npm
-COPY tsconfig.json ./
-COPY src ./src
-COPY public ./public
+COPY hub/tsconfig.json ./
+COPY hub/src ./src
+COPY hub/public ./public
+COPY skills ./skills
 
 EXPOSE 8080
 CMD ["npx", "tsx", "src/index.ts"]

@@ -156,7 +156,7 @@ nohup node scripts/e2e-demo.mjs http://localhost:8080 > /tmp/e2e.log 2>&1 &
 
 ## R-series incidents (R1-R7 bring-up)
 
-## R-series 1. Progress-tailer re-pumped committed attempt history (R4 wedge)
+### R-series 1. Progress-tailer re-pumped committed attempt history (R4 wedge)
 
 Symptom: workers hung forever after `task-branch push pushed`; jobs burned
 attempts; job_events flooded (8k+ events for one job). Root cause: task
@@ -168,7 +168,7 @@ pre-workload snapshot is this job's progress). Lesson: append-only task
 branches make every committed artifact "live" in future checkouts —
 collection/relay code must diff against the checkout baseline.
 
-## R-series 2. Exit signaling deadlocks (three shapes)
+### R-series 2. Exit signaling deadlocks (three shapes)
 
 (a) attempt-closure exits re-emitted every tick killed restarted workers in
 a loop (fix: one-shot `exit_signaled_at`); (b) one-shot exits never reached
@@ -178,7 +178,7 @@ acks didn't revert the offered job (fix: refuse_offer → revert + release).
 Lesson: per-container generations + per-activity outcomes need an explicit
 reconciliation pass every tick.
 
-## R-series 3. Everything-on-main churn (notes vs landings)
+### R-series 3. Everything-on-main churn (notes vs landings)
 
 Retention notes moved main under in-flight verified branches → rebase →
 re-verify → re-audit loops, burning rebase-round caps. Fixes: merged
@@ -188,14 +188,14 @@ hub-side mechanical rebase with CAS for dead-worker divergence. Lesson:
 any writer that moves main (notes, syncs) must coordinate with the landing
 queue or it multiplies rebase churn.
 
-## R-series 4. Import-hoisting breaks lazy env config
+### R-series 4. Import-hoisting breaks lazy env config
 
 Test step files that top-level-import hub modules pull gitsvc in before
 BeforeAll sets REPOS_DIR/POLICY_PATH (module-level consts captured
 container defaults). Fix: lazy per-call env resolution. Lesson: any env
 read at module load is a BDD trap — resolve at call time.
 
-## R-series 5. Local-path pushes run the hook; fetches do not
+### R-series 5. Local-path pushes run the hook; fetches do not
 
 Secretary notes push to main → pre-receive DENIES (by design). Fix: temp
 clone commits the note, the bare FETCHES it (fetch runs no receive-side

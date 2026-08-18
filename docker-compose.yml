@@ -26,7 +26,9 @@ services:
       retries: 30
 
   hub:
-    build: ./hub
+    build:
+      context: .
+      dockerfile: hub/Dockerfile
     ports:
       - "${HUB_PORT:-8080}:8080"
     environment:
@@ -52,8 +54,6 @@ services:
       TLS_KEY_PATH: /data/git/tls/hub.key
       HF_STORE_PATH: /hf-store
     volumes:
-      # Framework repo (contains examples/demo-project) — read-only reference.
-      - ${PWD}:/repo:ro
       # Git plane: bare repos (rw — merges/sync write), CA+policy+certs (ro).
       - ./data/repos:/data/repos
       - ./data/git:/data/git:ro

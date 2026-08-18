@@ -119,7 +119,7 @@ export function createHttpServer(): ReturnType<typeof createHttpServerRaw> {
         const [plans, activities, jobs, latestEvents, nodes, approvals, gates, agents] = await Promise.all([
           pool.query("SELECT id, name, status, created_at FROM plans ORDER BY created_at DESC"),
           pool.query("SELECT plan_id, id, title, status, attempt, job_id, updated_at, depends_on FROM activities ORDER BY plan_id, id"),
-          pool.query("SELECT id, plan_id, activity, status, node, attempt, exit_code, created_at, updated_at FROM jobs ORDER BY created_at DESC LIMIT 200"),
+          pool.query("SELECT id, plan_id, activity, status, node, attempt, exit_code, repo, branch, base_sha, pushed_sha, created_at, updated_at FROM jobs ORDER BY created_at DESC LIMIT 200"),
           pool.query(
             `SELECT DISTINCT ON (job_id) job_id, pct, eta_s, stage, state, t
              FROM job_events ORDER BY job_id, seq DESC`,

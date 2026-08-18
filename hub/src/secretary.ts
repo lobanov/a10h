@@ -26,7 +26,7 @@ import { withRepoLock, repoDir } from "./gitsvc.ts";
 
 export interface HandoffDetails {
   role: "secretary";
-  skill: "skills/secretary/SKILL.md";
+  skill: string;
   intent: string;
   branch: string;
   base_sha: string;

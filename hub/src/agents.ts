@@ -7,7 +7,7 @@
  * back to the mechanical verdict alone (agents augment, never block); failed
  * turns retry with a cap, then fall back mechanically.
  */
-import { writeFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { pool } from "./db.ts";
 import { bus } from "./bus.ts";
@@ -27,6 +27,24 @@ let piPromise: Promise<any> | null = null;
 function pi(): Promise<any> {
   if (!piPromise) piPromise = importPi();
   return piPromise;
+}
+
+let cachedSecretarySkill: string | null | undefined;
+/** The framework-side role-shaping skill (skills/secretary/SKILL.md) is the
+ * single source of truth for the secretary persona — loaded into the session
+ * prompt (no hand-maintained paraphrase to drift). */
+function secretarySkillPrompt(): string {
+  if (cachedSecretarySkill !== undefined) return cachedSecretarySkill ?? "";
+  for (const p of ["skills/secretary/SKILL.md", "/app/skills/secretary/SKILL.md"]) {
+    try {
+      if (existsSync(p)) {
+        cachedSecretarySkill = readFileSync(p, "utf8") + "\n\n---\n\n";
+        return cachedSecretarySkill;
+      }
+    } catch { /* next candidate */ }
+  }
+  cachedSecretarySkill = null;
+  return "";
 }
 
 export interface AgentConfig {
@@ -218,7 +236,7 @@ export async function queueVerification(input: {
     runAgentTurn({
       role: "secretary",
       model: cfg.secretaryModel,
-    systemPrompt:
+    systemPrompt: secretarySkillPrompt() +
       "You are the research lab's secretary agent performing FORMAL gate verification: check that submission criteria are met and claims are evidenced and reasonable. " +
       "You must call the tool record_audit exactly once with {verdict, note}. " +
       "verdict is one of: agree_pass, agree_fail, dispute. " +

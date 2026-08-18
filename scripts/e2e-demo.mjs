@@ -139,7 +139,12 @@ async function main() {
     if (audited >= 1) break;
     await sleep(3000);
   }
-  check("auditor agent reviewed gates", audited >= 1, `${audited}/${gates.length} audited`);
+  // Only REAL secretary turns count — the mechanical-fallback note
+  // (agents down / model_not_found) must not rubber-stamp this check.
+  const realVerifications = state.agent_log?.filter(
+    (l) => l.role === "secretary" && l.event === "verification_recorded",
+  ) ?? [];
+  check("secretary verification recorded", realVerifications.length >= 1, `${realVerifications.length} real turns; ${audited}/${gates.length} notes`);
 
   // 8. evidence + artifact validation via protocols/validate.mjs
   const planJobs = state.jobs.filter((j) => j.plan_id === PLAN_NAME);
@@ -178,31 +183,45 @@ async function main() {
     const refExists = (ref) => { try { g(["rev-parse", "--verify", "--quiet", ref]); return true; } catch { return false; } };
     const isAncestor = (a, b) => { try { execFileSync("git", ["--git-dir", REPO, "merge-base", "--is-ancestor", a, b], { stdio: "ignore" }); return true; } catch { return false; } };
 
-    check("task branches pre-created under the plan scope", refExists(`refs/tasks/${PLAN_NAME}/baseline`));
+    const allRefs = ["baseline", "variant-a", "variant-b", "analysis", "repair-demo"].filter((a) => refExists(`refs/tasks/${PLAN_NAME}/${a}`));
+    check("task branches pre-created under the plan scope", allRefs.length === 5, allRefs.join(","));
 
-    // Wrong-ref push denial through the deployed gitserver (from a worker
-    // container — the gitserver is compose-internal by design).
+    // Wrong-ref push denial through the deployed gitserver (in-stack; the
+    // gitserver is compose-internal). The assertion pins the POLICY message
+    // (hook decline / read-only main) — a TLS/clone/network failure fails
+    // the check instead of passing it for the wrong reason.
     const push = spawnSync("docker", [
       "compose", "exec", "-T", "gitserver", "sh", "-c",
-      `T=$(cat /data/git/tokens/worker-a.token); git config --global http.sslCAInfo /data/git/ca/ca.crt; ` +
-      `cd /tmp && rm -rf denycheck && git clone -q https://\$T@gitserver/demo.git denycheck && ` +
-      `cd denycheck && echo deny >> goal.md && git add -A && git -c user.name=e2e -c user.email=e2e@local commit -qm denycheck && ` +
-      `git push origin HEAD:refs/heads/main; echo EXIT=\$?`,
+      `T=$(cat /data/git/tokens/worker-a.token); D=$(mktemp -d); export GIT_SSL_CAINFO=/data/git/ca/ca.crt; ` +
+      `git clone -q https://\$T@gitserver/demo.git \$D/wt && ` +
+      `cd \$D/wt && echo deny >> goal.md && git add -A && git -c user.name=e2e -c user.email=e2e@local commit -qm denycheck && ` +
+      `{ git push origin HEAD:refs/heads/main 2>&1 || true; } | tail -4; ` +
+      `rm -rf \$D`,
     ], { cwd: ROOT, encoding: "utf8" });
     const pushOut = `${push.stdout ?? ""}${push.stderr ?? ""}`;
-    check("worker-token push to main denied", /EXIT=[1-9]/.test(pushOut), pushOut.trim().split("\n").pop()?.slice(0, 80));
+    const policyDenied = /pre-receive hook declined|main is read-only|remote rejected/i.test(pushOut);
+    check("worker-token push to main denied by policy", policyDenied, pushOut.trim().split("\n").slice(-2).join(" | ").slice(0, 110));
 
     // Verified-complete merges: every successful activity's branch tip is
     // contained in main (serialized landing; rebase path exercised whenever
     // main moved between branch cuts and landings — which every run with
     // notes does).
-    // The final merge (analysis) may still be in its verification round —
-    // poll up to 120s for full convergence.
+    // Merge convergence (rebase rounds + serialized verification turns can
+    // take minutes) — poll up to 8 minutes like the other waits. The tip
+    // must DIFFER from the job's base (the worker actually pushed) AND be
+    // contained in main.
+    const jobBase = (activity) => {
+      const j = planJobs.find((p) => p.activity === activity);
+      return j?.base_sha ?? null;
+    };
     let landed = [];
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 240; i++) {
       landed = ["baseline", "variant-a", "variant-b", "analysis"].filter((a) => {
         const ref = `refs/tasks/${PLAN_NAME}/${a}`;
-        return refExists(ref) && isAncestor(g(["rev-parse", ref]), "main");
+        if (!refExists(ref)) return false;
+        const tip = g(["rev-parse", ref]);
+        const base = jobBase(a);
+        return isAncestor(tip, "main") && (!base || tip !== base);
       });
       if (landed.length === 4) break;
       await sleep(2000);
@@ -214,8 +233,48 @@ async function main() {
     const notes = g(["ls-tree", "-r", "--name-only", "main"]).split("\n").filter((f) => f.startsWith(`notes/${PLAN_NAME}/`));
     check("failed repair branch preserved", refExists(repairRef));
     check("attempt notes committed to main", notes.length >= 4, notes.join(" ").slice(0, 90));
-    const repairNote = notes.find((f) => f.includes("repair-demo"));
+    // The failed attempt's note is deferred while landings pend (batching) —
+    // poll for it too.
+    let repairNote = null;
+    for (let i = 0; i < 60; i++) {
+      repairNote = g(["ls-tree", "-r", "--name-only", "main"]).split("\n").find((f) => f.startsWith(`notes/${PLAN_NAME}/`) && f.includes("repair-demo")) ?? null;
+      if (repairNote) break;
+      await sleep(2000);
+    }
     check("failed attempt has a summary note", Boolean(repairNote), repairNote ?? "none");
+  }
+
+  // ---------- R7: exit bundle committed (retrospective + summary) ----------
+  {
+    const REPO = join(ROOT, "data/repos/demo.git");
+    const show = (sha, path) => {
+      try {
+        return execFileSync("git", ["--git-dir", REPO, "show", `${sha}:${path}`], { encoding: "utf8", maxBuffer: 1024 * 1024 });
+      } catch {
+        return null;
+      }
+    };
+    // The analysis job's pushed SHA comes from the lineage index.
+    const analysisJob = planJobs.find((j) => j.activity === "analysis");
+    let retro = null;
+    let summary = null;
+    if (analysisJob) {
+      const arts = await api(`/api/jobs/${analysisJob.id}/artifacts`);
+      const sha = arts.artifacts?.[0]?.commit_sha ?? null;
+      if (sha) {
+        summary = show(sha, "runs/analysis/summary.md");
+        // retrospective may append after the reported SHA — check the branch tip too
+        retro = show(sha, "runs/analysis/retrospective.md");
+        if (!retro) {
+          try {
+            const tip = execFileSync("git", ["--git-dir", REPO, "rev-parse", `refs/tasks/${PLAN_NAME}/analysis`], { encoding: "utf8" }).trim();
+            retro = show(tip, "runs/analysis/retrospective.md");
+          } catch { retro = null; }
+        }
+      }
+    }
+    check("analysis summary committed", Boolean(summary && summary.length > 20), summary ? `${summary.length} chars` : "missing");
+    check("worker retrospective committed", Boolean(retro && /retrospective/i.test(retro)), retro ? `${retro.length} chars` : "missing");
   }
 
   // summary

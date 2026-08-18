@@ -13,7 +13,8 @@ function tokenParams() {
 async function api(path, opts = {}) {
   const t = localStorage.getItem("auth_token");
   const headers = { "content-type": "application/json", ...(t ? { authorization: `Bearer ${t}` } : {}) };
-  const res = await fetch(path + (path.includes("?") ? "&" : "") + (t ? `token=${encodeURIComponent(t)}` : ""), {
+  const joiner = path.includes("?") ? "&" : "?";
+  const res = await fetch(path + (t ? `${joiner}token=${encodeURIComponent(t)}` : ""), {
     ...opts, headers: { ...headers, ...(opts.headers || {}) },
   });
   if (res.status === 401) {
