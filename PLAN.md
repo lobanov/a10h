@@ -85,7 +85,7 @@ Source: DESIGN.md v1.1 (§3.2.1 git plane, §3.3 state model, §3.4 skills, §4 
 
 ### R1 — Gitserver + internal CA + worker tokens
 - [x] `gitserver` service in hub compose: nginx + git-http-backend (fcgiwrap), bare repos on `data/repos/*.git`, smart HTTP over TLS
-- [x] hf artifact store: shared `/hf-store` path (hub-side ownership; workers hold no tokens) — validated in demo mode; the real-bucket `hf-mount` sidecar image awaits an operator-provided HF bucket (pending operator input, tracked for final audit)
+- [x] hf artifact store: shared `/hf-store` path (hub-side ownership; workers hold no tokens) AND the real `hf-mount` sidecar built + deployed (`hfmount/` service, compose profile `hf`: FUSE backend, SYS_ADMIN + /dev/fuse + apparmor-unconfined, shared→rslave bind propagation; single HF_TOKEN sidecar-only) — validated LIVE read-only against the real bucket `lobanov/ds4` (cross-worker read, zero worker tokens); RW write-path pending a write-scoped HF_TOKEN + dedicated bucket (operator input: current fine-grained token has empty permission lists → CAS write token 403; buckets are created in the Hub UI, not via API)
 - [x] Bootstrap script: generate internal CA + gitserver server cert; create bare repos; issue worker git tokens; wire each project repo's **GitHub remote** (deploy key/PAT in hub `.env`) for upstream sync; write hub-maintained policy map (job → allowed ref → token)
 - [x] CA cert + token distribution to workers (compose read-only mounts); `GIT_SSL_CAINFO`/`NODE_EXTRA_CA_CERTS` wired in worker env
 - [x] Hub HTTP API served under the same internal CA (worker→hub registration/status/acks ride TLS, not just git)

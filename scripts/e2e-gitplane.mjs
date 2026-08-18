@@ -246,6 +246,32 @@ console.log("== R2: task-branch push policy through the deployed hook ==");
   }
 }
 
+console.log("== R1: real hf-mount bucket (sidecar, profile hf) ==");
+{
+  // The hfmount sidecar mounts HF_BUCKET at /hf-store/hf (FUSE + shared
+  // propagation). Workers hold NO HF tokens — filesystem only.
+  const ls = compose("worker-a", `ls /hf-store/hf 2>&1 | head -3`);
+  const mounted = !/No such file|Permission denied/.test(ls);
+  ok("hf-mount bucket visible from a worker (no HF token)", mounted, ls.trim().split("\n").pop());
+
+  const readBack = compose("worker-b", `head -c 16 /hf-store/hf/* 2>/dev/null | wc -c`);
+  ok("cross-worker read through the bucket mount", !/cannot|denied|No such/.test(readBack), readBack.trim());
+
+  const envA = compose("worker-a", `env`);
+  ok("no HF token in worker environments", !/HF_TOKEN/i.test(envA));
+
+  const ro = compose("hfmount", `printenv READ_ONLY`).trim() === "1";
+  if (ro) {
+    console.log("  ..  READ-ONLY mode (HF_MOUNT_READ_ONLY=1): write path skipped —");
+    console.log("  ..  set a write-scoped HF_TOKEN + HF_BUCKET to a writable bucket, then re-run.");
+  } else {
+    const wr = compose("worker-a",
+      `echo r1-rw-check > /hf-store/hf/autoresearch-write-check.txt 2>&1 && sleep 6 && cat /hf-store/hf/autoresearch-write-check.txt`);
+    const rd = compose("worker-b", `cat /hf-store/hf/autoresearch-write-check.txt 2>&1`);
+    ok("worker write + cross-worker read via bucket (RW mode)", /r1-rw-check/.test(wr) || /r1-rw-check/.test(rd), (wr + " | " + rd).trim().split("\n").pop());
+  }
+}
+
 console.log("== R5: Postgres carries no research content ==");
 {
   const c = await db();

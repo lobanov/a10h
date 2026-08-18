@@ -57,8 +57,13 @@ services:
       # Git plane: bare repos (rw — merges/sync write), CA+policy+certs (ro).
       - ./data/repos:/data/repos
       - ./data/git:/data/git:ro
-      # HF artifact store (hub-side mount; workers share the same path).
-      - ./data/hf-store:/hf-store
+      # HF artifact store (hub-side ownership; hf-mount sidecar may mount a
+      # real bucket at /hf-store/hf — receive its submounts).
+      - type: bind
+        source: ./data/hf-store
+        target: /hf-store
+        bind:
+          propagation: rslave
     depends_on:
       postgres:
         condition: service_healthy
@@ -75,6 +80,32 @@ services:
       - ./data/git:/data/git:ro
     depends_on:
       - hub
+
+  hfmount:
+    # R1: real HF Bucket mount (hf-mount, FUSE backend). Requires HF_TOKEN
+    # (hub-side only) + HF_BUCKET in .env. Exposes the bucket at
+    # ./data/hf-store/hf via shared bind propagation; hub/workers mount the
+    # same path rslave and hold NO HF tokens.
+    build: ./hfmount
+    profiles: ["hf"]
+    restart: unless-stopped
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HF_BUCKET: ${HF_BUCKET:-lobanov/ds4/autoresearch}
+      READ_ONLY: ${HF_MOUNT_READ_ONLY:-0}
+    devices:
+      - /dev/fuse:/dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    # Ubuntu's default container AppArmor profile denies mount(2) for FUSE.
+    security_opt:
+      - apparmor:unconfined
+    volumes:
+      - type: bind
+        source: ./data/hf-store
+        target: /hf-store
+        bind:
+          propagation: shared
 
   worker-a:
     build: ./worker
@@ -99,7 +130,11 @@ services:
       # CA key, server keys, or other nodes' tokens).
       - ./data/git/ca/ca.crt:/data/git/ca/ca.crt:ro
       - ./data/git/tokens/worker-a.token:/data/git/tokens/worker-a.token:ro
-      - ./data/hf-store:/hf-store
+      - type: bind
+        source: ./data/hf-store
+        target: /hf-store
+        bind:
+          propagation: rslave
     depends_on:
       - hub
       - gitserver
@@ -123,7 +158,11 @@ services:
       - ./data/work-b:/work
       - ./data/git/ca/ca.crt:/data/git/ca/ca.crt:ro
       - ./data/git/tokens/worker-b.token:/data/git/tokens/worker-b.token:ro
-      - ./data/hf-store:/hf-store
+      - type: bind
+        source: ./data/hf-store
+        target: /hf-store
+        bind:
+          propagation: rslave
     depends_on:
       - hub
       - gitserver
